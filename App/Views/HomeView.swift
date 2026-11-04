@@ -6,7 +6,7 @@ struct HomeView: View {
     var body: some View {
         PageScroll {
             PageHeader(title: "SecretClub") {
-                NetworkChip(mode: app.networkMode)
+                NetworkChip(title: app.networkChip.title, color: app.networkChip.color)
             }
             if app.needsConsent {
                 ConsentCard()
@@ -17,6 +17,8 @@ struct HomeView: View {
             }
             if let error = app.vpn.lastError {
                 NoticeCard(text: error, icon: "exclamationmark.triangle.fill", color: Theme.orange)
+            } else if app.vpn.state == .connected, let note = app.autoNotice {
+                NoticeCard(text: note, icon: "arrow.triangle.2.circlepath", color: Theme.tint)
             } else if app.routes.isEmpty, let error = app.refreshError ?? app.accountError {
                 NoticeCard(text: error, icon: "exclamationmark.triangle.fill", color: Theme.orange)
             }
@@ -160,7 +162,7 @@ struct ConnectionHero: View {
                 HStack(spacing: 8) {
                     StatTile(label: "Получено", value: Format.bytes(app.vpn.bytesIn))
                     StatTile(label: "Отправлено", value: Format.bytes(app.vpn.bytesOut))
-                    StatTile(label: "Пинг", value: Ping.text(app.activeRoute?.ping))
+                    StatTile(label: "Пинг", value: Ping.text(app.vpn.report?.pingMS ?? app.activeRoute?.ping))
                 }
             }
             Button {
@@ -202,11 +204,12 @@ struct ConnectionHero: View {
 
 /// Компактный индикатор сети в шапке.
 struct NetworkChip: View {
-    let mode: NetworkMode
+    let title: String
+    let color: Color
     var body: some View {
         HStack(spacing: 6) {
-            Circle().fill(mode.color).frame(width: 7, height: 7)
-            Text(mode.short)
+            Circle().fill(color).frame(width: 7, height: 7)
+            Text(title)
         }
         .font(.onest(13, .semibold, relativeTo: .footnote))
         .foregroundStyle(Theme.label)

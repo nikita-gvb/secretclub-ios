@@ -12,6 +12,8 @@ struct BuildOptions {
 enum ConfigBuilder {
     static let tunTag = "tun"
     static let dnsOutTag = "dns-out"
+    /// Локальный HTTP-вход для проверки сервера из расширения (порт подставляет расширение).
+    static let healthTag = "health-in"
     /// Что есть в geoip.dat / geosite.dat из комплекта (sub.scvpn.app/geo).
     static let availableGeo: Set<String> = ["geoip:ru", "geoip:private", "geosite:ru-inside"]
     static let localDomains: Set<String> = ["domain:local", "domain:lan", "domain:home.arpa", "localhost"]
@@ -32,7 +34,8 @@ enum ConfigBuilder {
         var c = raw
         for key in ["remarks", "remnawave", "metrics", "stats", "api", "reverse"] { c.removeValue(forKey: key) }
         c["log"] = ["loglevel": options.quietLog ? "error" : "warning", "access": "none"]
-        c["inbounds"] = [tunInbound]
+        c["inbounds"] = [tunInbound, ["tag": healthTag, "listen": "127.0.0.1", "port": 0, "protocol": "http",
+                                      "settings": [String: Any]()]]
 
         var outbounds = c["outbounds"] as? [[String: Any]] ?? []
         let tags = Set(outbounds.compactMap { $0["tag"] as? String })
@@ -47,7 +50,10 @@ enum ConfigBuilder {
         var rules = original.compactMap { sanitize(rule: $0) }
         if !options.ruDirect { rules = rules.compactMap { stripRussianDirect($0) } }
 
+        var health: [String: Any] = ["type": "field", "inboundTag": [healthTag]]
+        health.merge(target) { $1 }
         var head: [[String: Any]] = [
+            health,
             ["type": "field", "inboundTag": [tunTag], "port": "53", "outboundTag": dnsOutTag],
         ]
         if !options.directDomains.isEmpty {

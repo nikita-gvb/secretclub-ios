@@ -8,6 +8,8 @@ struct ConnectRequest {
     let routeTitle: String
     let onDemand: Bool
     let killSwitch: Bool
+    /// JSON AutoPool — запасные серверы, на которые расширение переключится само.
+    var pool: String? = nil
 }
 
 struct VPNError: LocalizedError {
@@ -35,6 +37,8 @@ final class VPNController {
     @ObservationIgnored private var statsTask: Task<Void, Never>?
     @ObservationIgnored private var foreground = true
     @ObservationIgnored private(set) var isDemo = false
+    /// Каждый свежий отчёт расширения (сервер мог смениться сам).
+    @ObservationIgnored var onReport: (@MainActor (TunnelReport) -> Void)?
 
     static var tunnelBundleID: String {
         (Bundle.main.bundleIdentifier ?? "com.secretclub.app") + ".tunnel"
@@ -128,11 +132,13 @@ final class VPNController {
         let m: NETunnelProviderManager
         do {
             m = try await prepareManager(request)
-            try m.connection.startVPNTunnel(options: [
+            var options: [String: NSObject] = [
                 TunnelOption.config: request.config as NSString,
                 TunnelOption.routeID: request.routeID as NSString,
                 TunnelOption.routeTitle: request.routeTitle as NSString,
-            ])
+            ]
+            if let pool = request.pool { options[TunnelOption.pool] = pool as NSString }
+            try m.connection.startVPNTunnel(options: options)
         } catch {
             state = .disconnected
             throw VPNError(Self.describe(error))
@@ -152,6 +158,7 @@ final class VPNController {
         let command = TunnelCommand(kind: .reload, config: request.config, routeID: request.routeID, routeTitle: request.routeTitle)
         guard let reply = await send(command, attempts: 1, timeout: 25) else { return false }
         report = reply
+        onReport?(reply)
         if let error = reply.error, !reply.running { lastError = "Сервер не запустился: \(error)" }
         return reply.running && reply.error == nil
     }
@@ -243,6 +250,18 @@ final class VPNController {
         }
     }
 
+    /// Передать расширению свежий список запасных серверов.
+    func sendPool(_ pool: AutoPool) async {
+        guard !isDemo, state == .connected else { return }
+        _ = await send(TunnelCommand(kind: .pool, pool: pool), attempts: 2, timeout: 5)
+    }
+
+    /// Попросить расширение проверить сервер (network — сменилась сеть).
+    func requestCheck(network: Bool) async {
+        guard !isDemo, state == .connected else { return }
+        _ = await send(TunnelCommand(kind: .check, reason: network ? "network" : "app"), attempts: 1, timeout: 3)
+    }
+
     func setForeground(_ value: Bool) {
         foreground = value
         if value, state == .connected { startStats() } else if !value { stopStats() }
@@ -254,9 +273,10 @@ final class VPNController {
             while !Task.isCancelled {
                 guard let self else { return }
                 if let r = await self.send(TunnelCommand(kind: .status), attempts: 1, timeout: 2) {
-                    self.report = r
+                    if self.report != r { self.report = r }
                     self.bytesIn = r.downlink
                     self.bytesOut = r.uplink
+                    self.onReport?(r)
                 }
                 try? await Task.sleep(for: .seconds(1))
             }

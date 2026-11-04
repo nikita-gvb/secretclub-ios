@@ -9,6 +9,32 @@ enum TunnelOption {
     static let routeTitle = "routeTitle"
     /// Пробный туннель без ядра — для диагностики подписи.
     static let probe = "probe"
+    /// JSON AutoPool — запасные серверы для «Авто».
+    static let pool = "pool"
+}
+
+/// Сервер-кандидат для «Авто»: готовый конфиг, чтобы расширение могло само
+/// переключиться, если текущий сервер перестал работать (например, сменилась сеть).
+struct AutoCandidate: Codable, Hashable {
+    var id: String
+    var title: String
+    /// regular, bridge или reserve (RouteGroup.rawValue).
+    var group: String
+    var config: String
+    var target: PingTarget?
+}
+
+struct AutoPool: Codable {
+    /// false — выбран сервер вручную: только проверяем, не переключаем.
+    var auto: Bool
+    var candidates: [AutoCandidate]
+
+    func group(of id: String?) -> String? { candidates.first { $0.id == id }?.group }
+
+    /// Порядок групп для режима сети: резерв — в последнюю очередь (у него ограничен трафик).
+    static func order(for network: NetKind) -> [String] {
+        network == .whitelist ? ["bridge", "reserve"] : ["regular", "bridge", "reserve"]
+    }
 }
 
 /// Сервер для замера задержки из расширения (мимо туннеля).
@@ -22,12 +48,15 @@ struct PingTarget: Codable, Hashable {
 }
 
 struct TunnelCommand: Codable {
-    enum Kind: String, Codable { case status, reload, ping }
+    enum Kind: String, Codable { case status, reload, ping, pool, check }
     var kind: Kind
     var config: String? = nil
     var routeID: String? = nil
     var routeTitle: String? = nil
     var targets: [PingTarget]? = nil
+    var pool: AutoPool? = nil
+    /// Для check: network — сеть сменилась (можно вернуться на более быстрый сервер).
+    var reason: String? = nil
 }
 
 struct TunnelReport: Codable, Equatable {
@@ -43,6 +72,16 @@ struct TunnelReport: Codable, Equatable {
     var error: String?
     /// Ответ на команду ping: id сервера → мс.
     var pings: [String: Int]? = nil
+    /// Режим сети глазами расширения (мимо туннеля): normal, whitelist, offline.
+    var network: String? = nil
+    /// Последняя проверка выхода в интернет через сервер: nil — ещё не проверяли.
+    var healthy: Bool? = nil
+    /// Задержка через сервер при последней проверке.
+    var pingMS: Int? = nil
+    var checking = false
+    /// Сообщение для пользователя (например, «переключились на …»); noteID растёт с каждым новым.
+    var note: String? = nil
+    var noteID = 0
 }
 
 enum TunnelCoding {

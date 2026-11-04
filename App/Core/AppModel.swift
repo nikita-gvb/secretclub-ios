@@ -1,5 +1,6 @@
 import SwiftUI
 import Observation
+import Network
 
 enum AppTab: String, Hashable {
     case home, locations, subscription, settings
@@ -47,6 +48,10 @@ final class AppModel {
     var loginTicket: LoginTicket?
     /// Действие с аккаунтом, которое сейчас выполняется: consent, trial, reserve, device:<hwid>.
     var busyAction: String?
+    /// Работает ли текущий сервер по последней проверке расширения (nil — не проверяли).
+    var tunnelHealthy: Bool?
+    /// Сообщение от «Авто» в расширении: на что и почему переключились.
+    var autoNotice: String?
 
     @ObservationIgnored private var configs: [String: [String: Any]] = [:]
     @ObservationIgnored private var primaryParsed: ParsedSubscription?
@@ -54,6 +59,13 @@ final class AppModel {
     @ObservationIgnored private var settingsTask: Task<Void, Never>?
     @ObservationIgnored private var pollTask: Task<Void, Never>?
     @ObservationIgnored private var pollInFlight = false
+    /// Когда мерили каждый сервер (сбрасывается при смене сети).
+    @ObservationIgnored private var pingAt: [String: Date] = [:]
+    /// Ядро Xray в приложении одно: пинг и проверка конфига — по очереди.
+    @ObservationIgnored private var xrayBusy = false
+    @ObservationIgnored private var pathMonitor: NWPathMonitor?
+    @ObservationIgnored private var pathSignature: String?
+    @ObservationIgnored private var lastNoteID = 0
     @ObservationIgnored private let defaults = UserDefaults.standard
 
     let vpn = VPNController()
@@ -96,6 +108,8 @@ final class AppModel {
                 showLogin = true
             }
         }
+
+        vpn.onReport = { [weak self] report in self?.apply(report) }
 
         switch initialScreen {
         case "locations": selectedTab = .locations
@@ -156,6 +170,7 @@ final class AppModel {
     func start() async {
         guard !isDemo else { return }
         await vpn.load()
+        startPathMonitor()
         if let reportRoute = vpn.report?.routeID { connectedRouteID = reportRoute }
         if loginTicket != nil { startPolling() }
         if !vpn.isActive { await refreshNetwork() }
@@ -169,6 +184,7 @@ final class AppModel {
     func becameActive() async {
         vpn.setForeground(true)
         guard !isDemo else { return }
+        if vpn.state == .connected { Task { await vpn.requestCheck(network: false) } }
         if loginTicket != nil {
             pollNow()
             return
@@ -251,6 +267,7 @@ final class AppModel {
         refreshError = primaryError
         self.reserveError = reserveError
         rebuild()
+        await syncPool()
     }
 
     /// Загружает одну подписку. Возвращает текст ошибки или nil.
@@ -595,6 +612,88 @@ final class AppModel {
         networkMode = NetworkProbe.classify(results)
     }
 
+    private func startPathMonitor() {
+        guard pathMonitor == nil else { return }
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = Self.pathHandler { [weak self] signature in
+            Task { @MainActor in self?.pathChanged(signature) }
+        }
+        monitor.start(queue: DispatchQueue(label: "com.secretclub.path", qos: .utility))
+        pathMonitor = monitor
+    }
+
+    /// Обработчик вызывается на фоновой очереди — собираем его вне главного актора.
+    nonisolated private static func pathHandler(_ sink: @escaping @Sendable (String) -> Void) -> @Sendable (NWPath) -> Void {
+        { path in sink(NetworkCheck.signature(path)) }
+    }
+
+    /// Сменился Wi‑Fi/мобильный интернет: старые замеры и режим сети больше не верны.
+    private func pathChanged(_ signature: String) {
+        // Когда VPN включён, приложению может быть виден только туннель — это не смена сети.
+        guard signature != "other" else { return }
+        let previous = pathSignature
+        pathSignature = signature
+        guard let previous, previous != signature else { return }
+        for index in routes.indices {
+            routes[index].ping = nil
+            routes[index].unavailable = false
+        }
+        pingAt = [:]
+        pingedAt = nil
+        probedAt = nil
+        switch vpn.state {
+        case .connected, .connecting:
+            // Сеть проверит расширение (мимо туннеля) и при необходимости само сменит сервер.
+            networkMode = .unknown
+            tunnelHealthy = nil
+            Task {
+                try? await Task.sleep(for: .seconds(2))
+                await vpn.requestCheck(network: true)
+            }
+        case .disconnected, .invalid:
+            if signature == "none" {
+                networkMode = .offline
+                return
+            }
+            Task {
+                try? await Task.sleep(for: .seconds(1))
+                await refreshNetwork()
+                if selectedTab == .locations || !energySaver { await pingAll() }
+            }
+        case .preparing, .disconnecting:
+            networkMode = .unknown
+        }
+    }
+
+    /// Отчёт расширения: сервер мог смениться сам, плюс свежая проверка сети и сервера.
+    private func apply(_ report: TunnelReport) {
+        if let id = report.routeID, id != connectedRouteID, configs[id] != nil {
+            connectedRouteID = id
+            defaults.set(id, forKey: SettingsKey.connectedRoute)
+            if autoMode { autoRouteID = id }
+        }
+        if let raw = report.network, let mode = NetworkMode(rawValue: raw), mode != networkMode {
+            networkMode = mode
+        }
+        if tunnelHealthy != report.healthy { tunnelHealthy = report.healthy }
+        if let ms = report.pingMS, let id = report.routeID,
+           let index = routes.firstIndex(where: { $0.id == id }), routes[index].ping != ms {
+            routes[index].ping = ms
+            routes[index].unavailable = false
+            pingAt[id] = Date()
+        }
+        if report.noteID > lastNoteID {
+            lastNoteID = report.noteID
+            autoNotice = report.note
+        }
+    }
+
+    /// Индикатор в шапке: режим сети, а если VPN включён и сервер не отвечает — об этом.
+    var networkChip: (title: String, color: Color) {
+        if vpn.state == .connected, tunnelHealthy == false { return ("Сервер не отвечает", Theme.red) }
+        return (networkMode.short, networkMode.color)
+    }
+
     /// Пинговать можно, когда туннель выключен (меряем сами) или полностью включён (меряет расширение).
     var canPing: Bool {
         guard !isDemo, !routes.isEmpty else { return false }
@@ -622,9 +721,21 @@ final class AppModel {
         if ms == nil && keepOnFailure { return }
         routes[index].ping = ms
         routes[index].unavailable = ms == nil
+        pingAt[id] = Date()
+    }
+
+    /// Дождаться, пока закончится уже идущий замер.
+    private func waitForPing() async {
+        while isPinging { try? await Task.sleep(for: .milliseconds(120)) }
+    }
+
+    private func lockXray() async {
+        while xrayBusy { try? await Task.sleep(for: .milliseconds(100)) }
+        xrayBusy = true
     }
 
     /// Пинг серверов параллельно, результат появляется у каждого сразу.
+    /// Если замер уже идёт — ждём его и меряем своё (раньше запрос молча терялся).
     func ping(_ ids: [String]) async {
         if isDemo {
             isPinging = true
@@ -636,7 +747,9 @@ final class AppModel {
             isPinging = false
             return
         }
-        guard canPing, !isPinging, !ids.isEmpty else { return }
+        guard !ids.isEmpty else { return }
+        await waitForPing()
+        guard canPing else { return }
         isPinging = true
         pingingIDs = Set(ids)
         defer {
@@ -649,6 +762,8 @@ final class AppModel {
             return
         }
         let items = ids.compactMap { id in configs[id].map { (id: id, raw: $0) } }
+        await lockXray()
+        defer { xrayBusy = false }
         let ok = await PingService.run(items) { [weak self] id, ms in
             self?.setPing(id, ms)
         }
@@ -709,16 +824,24 @@ final class AppModel {
         return nil
     }
 
+    /// Замеры группы свежие: хотя бы один сервер ответил за последние 2 минуты в этой же сети.
+    private func isFresh(_ list: [Route]) -> Bool {
+        list.contains { route in
+            route.ping != nil && (pingAt[route.id].map { Date().timeIntervalSince($0) < 120 } ?? false)
+        }
+    }
+
     private func pickAuto() async -> Route? {
+        // Замер, начатый раньше (например, на экране локаций), сначала доводим до конца.
+        await waitForPing()
         if networkMode == .unknown || (probedAt.map { Date().timeIntervalSince($0) > 120 } ?? true) {
             phase = "Проверяем сеть…"
             await refreshNetwork()
         }
-        let fresh = pingedAt.map { Date().timeIntervalSince($0) < 300 } ?? false
         for group in groupOrder {
             let list = candidates(group)
             guard !list.isEmpty else { continue }
-            if !fresh || list.allSatisfy({ $0.ping == nil }) {
+            if !isFresh(list) {
                 phase = "Ищем быстрый сервер: \(group.shortTitle)…"
                 await ping(list.map(\.id))
             }
@@ -741,17 +864,59 @@ final class AppModel {
                               killSwitch: defaults.bool(forKey: SettingsKey.killSwitch))
     }
 
+    /// Запасные серверы для расширения: лучшие из каждой группы с готовыми конфигами.
+    /// По ним оно само переключится, если сменилась сеть или сервер перестал отвечать.
+    func makePool() -> AutoPool {
+        var list: [AutoCandidate] = []
+        var seen = Set<String>()
+        func add(_ route: Route) {
+            guard !seen.contains(route.id), let raw = configs[route.id], let req = request(for: route) else { return }
+            seen.insert(route.id)
+            list.append(AutoCandidate(id: route.id, title: req.routeTitle, group: route.group.rawValue, config: req.config,
+                                      target: ConfigBuilder.pingTarget(id: route.id, raw: raw, udp: route.transport == .hysteria2)))
+        }
+        for group in RouteGroup.allCases {
+            let ranked = candidates(group).sorted { ($0.ping ?? Int.max) < ($1.ping ?? Int.max) }
+            ranked.prefix(6).forEach(add)
+        }
+        if let id = connectedRouteID, let route = routes.first(where: { $0.id == id }) { add(route) }
+        return AutoPool(auto: autoMode, candidates: list)
+    }
+
+    private func syncPool() async {
+        guard !isDemo, vpn.state == .connected else { return }
+        await vpn.sendPool(makePool())
+    }
+
     /// Проверка конфига самим ядром до запуска туннеля — понятная ошибка вместо «не подключилось».
     private func validate(_ route: Route) async -> String? {
         guard let raw = configs[route.id] else { return "Нет настроек для «\(route.title)»" }
         let runtime = ConfigBuilder.runtime(raw, options: settings)
         guard let json = ConfigBuilder.validation(runtime, assetDir: Bundle.main.resourcePath) else { return "Не удалось собрать конфиг" }
+        await lockXray()
+        defer { xrayBusy = false }
         do {
             try await XrayEngine.test(json)
             return nil
         } catch {
+            guard Self.isCoreBusy(error) else {
+                return "Конфиг «\(route.title)» не прошёл проверку: \(error.localizedDescription)"
+            }
+        }
+        // Ядро в приложении ещё занято замером — останавливаем и проверяем ещё раз.
+        _ = try? await XrayEngine.call("stopXray")
+        do {
+            try await XrayEngine.test(json)
+            return nil
+        } catch {
+            // Проверка — только подсказка; если ядро так и не освободилось, просто подключаемся.
+            if Self.isCoreBusy(error) { return nil }
             return "Конфиг «\(route.title)» не прошёл проверку: \(error.localizedDescription)"
         }
+    }
+
+    private static func isCoreBusy(_ error: Error) -> Bool {
+        error.localizedDescription.contains("isolated process")
     }
 
     func toggleConnection() async {
@@ -771,6 +936,8 @@ final class AppModel {
             return
         }
         vpn.beginPreparing()
+        autoNotice = nil
+        tunnelHealthy = nil
         if routes.isEmpty {
             phase = "Загружаем серверы…"
             await refreshSubscription()
@@ -799,12 +966,13 @@ final class AppModel {
             return
         }
         phase = nil
-        guard let req = request(for: route) else {
+        guard var req = request(for: route) else {
             vpn.cancelPreparing("Не удалось собрать конфиг для «\(route.title)».")
             return
         }
         connectedRouteID = route.id
         defaults.set(route.id, forKey: SettingsKey.connectedRoute)
+        req.pool = TunnelCoding.encode(makePool()).map { String(decoding: $0, as: UTF8.self) }
         do {
             try await vpn.connect(req)
         } catch {
@@ -822,7 +990,10 @@ final class AppModel {
 
     /// Переключиться на другой сервер, не выключая VPN.
     private func switchTo(_ route: Route) async {
-        guard vpn.state == .connected, route.id != connectedRouteID else { return }
+        guard vpn.state == .connected, route.id != connectedRouteID else {
+            await syncPool()
+            return
+        }
         if isDemo {
             connectedRouteID = route.id
             return
@@ -834,17 +1005,26 @@ final class AppModel {
         guard let req = request(for: route) else { return }
         connectedRouteID = route.id
         defaults.set(route.id, forKey: SettingsKey.connectedRoute)
-        if await vpn.reload(req) { return }
+        autoNotice = nil
+        if await vpn.reload(req) {
+            await syncPool()
+            return
+        }
         await vpn.disconnect()
-        do { try await vpn.connect(req) } catch { vpn.lastError = error.localizedDescription }
+        var full = req
+        full.pool = TunnelCoding.encode(makePool()).map { String(decoding: $0, as: UTF8.self) }
+        do { try await vpn.connect(full) } catch { vpn.lastError = error.localizedDescription }
     }
 
     func selectAuto() {
         autoMode = true
         defaults.set(true, forKey: SettingsKey.autoMode)
-        if vpn.state == .connected, let best = bestCachedRoute() {
+        guard vpn.state == .connected else { return }
+        if let best = bestCachedRoute() {
             autoRouteID = best.id
             Task { await switchTo(best) }
+        } else {
+            Task { await syncPool() }
         }
     }
 
@@ -865,6 +1045,7 @@ final class AppModel {
             guard !Task.isCancelled, let id = connectedRouteID, let route = routes.first(where: { $0.id == id }),
                   let req = request(for: route) else { return }
             _ = await vpn.reload(req)
+            await syncPool()
         }
     }
 

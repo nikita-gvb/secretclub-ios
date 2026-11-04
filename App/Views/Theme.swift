@@ -86,6 +86,21 @@ enum Appearance {
         button.normal.titleTextAttributes = [.font: uiFont(17, .regular)]
         nav.buttonAppearance = button
         nav.backButtonAppearance = button
+        if #available(iOS 26.0, *) {
+            // iOS 26: фон баров рисует сама система (Liquid Glass и размытие у края) — задаём только шрифты.
+            UINavigationBar.appearance().standardAppearance = nav
+            UINavigationBar.appearance().compactAppearance = nav
+            UINavigationBar.appearance().scrollEdgeAppearance = nav
+        } else {
+            applyLegacyBars(nav, button: button)
+        }
+
+        let seg = UISegmentedControl.appearance()
+        seg.setTitleTextAttributes([.font: uiFont(15, .medium), .foregroundColor: UIColor.white], for: .normal)
+        seg.selectedSegmentTintColor = UIColor(red: 0x63 / 255, green: 0x63 / 255, blue: 0x66 / 255, alpha: 1)
+    }
+
+    private static func applyLegacyBars(_ nav: UINavigationBarAppearance, button: UIBarButtonItemAppearance) {
         let scrolled = UINavigationBarAppearance()
         scrolled.configureWithDefaultBackground()
         scrolled.backgroundEffect = UIBlurEffect(style: .systemUltraThinMaterialDark)
@@ -98,10 +113,6 @@ enum Appearance {
         UINavigationBar.appearance().standardAppearance = scrolled
         UINavigationBar.appearance().compactAppearance = scrolled
         UINavigationBar.appearance().scrollEdgeAppearance = nav
-
-        let seg = UISegmentedControl.appearance()
-        seg.setTitleTextAttributes([.font: uiFont(15, .medium), .foregroundColor: UIColor.white], for: .normal)
-        seg.selectedSegmentTintColor = UIColor(red: 0x63 / 255, green: 0x63 / 255, blue: 0x66 / 255, alpha: 1)
     }
 
     static func uiFont(_ size: CGFloat, _ weight: Font.Weight) -> UIFont {

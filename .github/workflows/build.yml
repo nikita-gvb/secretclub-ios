@@ -12,12 +12,15 @@ concurrency:
 jobs:
   build:
     runs-on: macos-15-intel
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
       - name: Tools
         run: |
+          # Xcode 26 (iOS 26 SDK): только с ним iOS включает Liquid Glass (новый таб-бар и пр.).
+          X=$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)
+          sudo xcode-select -s "$X/Contents/Developer"
           xcodebuild -version
           brew install xcodegen
           xcodegen --version
@@ -44,7 +47,7 @@ jobs:
       - name: Pick simulator
         run: |
           UDID=$(xcrun simctl list devices available -j | jq -r '
-            [.devices | to_entries[] | select(.key | test("iOS")) | .value[] | select(.name | test("^iPhone [0-9]+ Pro$"))]
+            [.devices | to_entries[] | select(.key | test("iOS-26")) | .value[] | select(.name | test("^iPhone [0-9]+ Pro$"))]
             | last | .udid // empty')
           if [ -z "$UDID" ]; then
             UDID=$(xcrun simctl list devices available -j | jq -r '[.devices | to_entries[] | select(.key | test("iOS")) | .value[] | select(.name | test("^iPhone"))] | last | .udid')

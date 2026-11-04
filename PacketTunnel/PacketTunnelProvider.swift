@@ -381,7 +381,7 @@ extension PacketTunnelProvider {
 
     /// Сменился Wi‑Fi/мобильный интернет: старые соединения всё равно оборвались — проверяем сервер
     /// и, если нужно, подбираем другой под новую сеть. Вызывается на очереди work.
-    private func pathChanged(_ path: NWPath) {
+    private func pathChanged(_ path: Network.NWPath) {
         let signature = NetworkCheck.signature(path)
         guard signature != "other" else { return }
         let previous = pathSignature

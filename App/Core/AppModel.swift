@@ -83,8 +83,9 @@ final class AppModel {
             }
             if initialScreen == "locations" { pingingIDs = ["de-cdn", "ru-cdn"] }
         } else {
-            hasSession = Keychain.read(Keychain.sessionKey) != nil
-            isLoggedIn = hasSession || Keychain.read(Keychain.subscriptionKey) != nil
+            let session = Keychain.read(Keychain.sessionKey) != nil
+            hasSession = session
+            isLoggedIn = session || Keychain.read(Keychain.subscriptionKey) != nil
             autoMode = defaults.object(forKey: SettingsKey.autoMode) as? Bool ?? true
             selectedRouteID = defaults.string(forKey: SettingsKey.selectedRoute)
             connectedRouteID = defaults.string(forKey: SettingsKey.connectedRoute)

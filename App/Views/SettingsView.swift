@@ -142,7 +142,7 @@ struct ExceptionsView: View {
                         ForEach(ExceptionTarget.allCases) { Text($0.title).tag($0) }
                     }
                     .pickerStyle(.segmented)
-                    Text("Правило действует и для поддоменов: example.com включает www.example.com.")
+                    Text(verbatim: "Правило действует и для поддоменов: example.com включает www.example.com.")
                         .font(.scFoot)
                         .foregroundStyle(Theme.label2)
                         .frame(maxWidth: .infinity, alignment: .leading)

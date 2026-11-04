@@ -115,14 +115,17 @@ struct AppBackground: View {
     /// Мягкое оранжевое свечение сверху — как в мини-аппе, но одно и тихое.
     var glow: Double = 0.22
     var body: some View {
-        ZStack(alignment: .topLeading) {
-            Theme.background
-            RadialGradient(colors: [Theme.tintStrong.opacity(glow), .clear], center: .center, startRadius: 0, endRadius: 260)
-                .frame(width: 520, height: 520)
-                .offset(x: -220, y: -300)
-                .blur(radius: 30)
-        }
-        .ignoresSafeArea()
+        Theme.background
+            .overlay(alignment: .topLeading) {
+                if glow > 0 {
+                    RadialGradient(colors: [Theme.tintStrong.opacity(glow), .clear], center: .center, startRadius: 0, endRadius: 260)
+                        .frame(width: 520, height: 520)
+                        .offset(x: -220, y: -300)
+                        .blur(radius: 30)
+                        .allowsHitTesting(false)
+                }
+            }
+            .ignoresSafeArea()
     }
 }
 

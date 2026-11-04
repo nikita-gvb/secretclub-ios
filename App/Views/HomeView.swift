@@ -147,7 +147,7 @@ struct ConnectionHero: View {
     private var subline: String {
         guard let route = app.activeRoute else { return "Выберите локацию" }
         if isOn { return "\(route.flag) \(route.country) · \(route.transport.title)" }
-        return "\(route.flag) \(route.country) · нажмите «Подключить»"
+        return "\(route.flag) \(route.country) · \(app.autoMode ? "авто" : route.transport.title)"
     }
 
     @ViewBuilder private var badge: some View {

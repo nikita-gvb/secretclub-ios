@@ -6,9 +6,7 @@ struct OnboardingView: View {
     @State private var showScanner = false
 
     var body: some View {
-        ZStack {
-            AppBackground(glow: 0.3)
-            VStack(spacing: 0) {
+        VStack(spacing: 0) {
                 Spacer(minLength: 24)
                 BrandMark(size: 88)
                 Text("SecretClub")
@@ -64,7 +62,8 @@ struct OnboardingView: View {
             }
             .padding(.horizontal, 12)
             .padding(.bottom, 8)
-        }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(AppBackground(glow: 0.3))
         .sheet(isPresented: $showPaste) { PasteLinkSheet() }
         .sheet(isPresented: $showScanner) { QRScannerSheet() }
     }

@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct OnboardingView: View {
-    @Environment(\.openURL) private var openURL
+    @Environment(AppModel.self) private var app
     @State private var showPaste = false
     @State private var showScanner = false
 
@@ -14,7 +14,7 @@ struct OnboardingView: View {
                     .tracking(-0.8)
                     .foregroundStyle(Theme.label)
                     .padding(.top, 22)
-                Text("Свободный интернет — даже при белых списках")
+                Text("Свободный интернет — даже когда сеть ограничена")
                     .font(.scBody)
                     .foregroundStyle(Theme.label2)
                     .multilineTextAlignment(.center)
@@ -23,7 +23,7 @@ struct OnboardingView: View {
 
                 VStack(alignment: .leading, spacing: 18) {
                     FeatureRow(icon: "sparkles", title: "Авто-режим", text: "Сам находит рабочий маршрут в любой сети")
-                    FeatureRow(icon: "shield.lefthalf.filled", title: "Обход белых списков", text: "Через CDN, когда остальное не работает")
+                    FeatureRow(icon: "lifepreserver", title: "Резервное подключение", text: "Выручит, когда остальное не работает")
                     FeatureRow(icon: "leaf", title: "Бережёт батарею", text: "Без лишних фоновых проверок")
                 }
                 .padding(.top, 40)
@@ -33,7 +33,7 @@ struct OnboardingView: View {
 
                 VStack(spacing: 10) {
                     Button {
-                        openURL(Config.botLoginURL)
+                        app.showLogin = true
                     } label: {
                         Label("Войти через Telegram", systemImage: "paperplane.fill")
                     }
@@ -46,7 +46,7 @@ struct OnboardingView: View {
                             .buttonStyle(.scSecondary)
                     }
 
-                    Text("Нет подписки? Оформите в боте — это минута.")
+                    Text("Вход через бота @\(Config.botUsername) — подписки подтянутся сами.")
                         .font(.scFoot)
                         .foregroundStyle(Theme.label2)
                         .multilineTextAlignment(.center)
@@ -91,6 +91,8 @@ private struct FeatureRow: View {
 }
 
 struct PasteLinkSheet: View {
+    /// true — добавляем ссылку резервного подключения, а не основную.
+    var reserve = false
     @Environment(AppModel.self) private var app
     @Environment(\.dismiss) private var dismiss
     @State private var text = ""
@@ -101,7 +103,7 @@ struct PasteLinkSheet: View {
     var body: some View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 14) {
-                Text("Скопируйте ссылку на подписку в боте и вставьте её сюда.")
+                Text(reserve ? "Скопируйте в боте ссылку резервного подключения и вставьте её сюда." : "Скопируйте ссылку на подписку в боте и вставьте её сюда.")
                     .font(.scSub)
                     .foregroundStyle(Theme.label2)
                     .padding(.horizontal, 4)
@@ -128,7 +130,13 @@ struct PasteLinkSheet: View {
                     busy = true
                     error = nil
                     Task {
-                        if let problem = await app.login(with: text) {
+                        let problem: String?
+                        if reserve {
+                            problem = await app.addReserve(with: text)
+                        } else {
+                            problem = await app.login(with: text)
+                        }
+                        if let problem {
                             error = problem
                             busy = false
                         } else {
@@ -138,7 +146,7 @@ struct PasteLinkSheet: View {
                 } label: {
                     HStack(spacing: 8) {
                         if busy { ProgressView().tint(Theme.onTint) }
-                        Text(busy ? "Проверяем подписку…" : "Войти")
+                        Text(busy ? "Проверяем подписку…" : (reserve ? "Добавить" : "Войти"))
                     }
                 }
                 .buttonStyle(.scPrimary)
@@ -146,7 +154,7 @@ struct PasteLinkSheet: View {
             }
             .padding(16)
             .background(Theme.background.ignoresSafeArea())
-            .navigationTitle("Ссылка на подписку")
+            .navigationTitle(reserve ? "Резервное подключение" : "Ссылка на подписку")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {

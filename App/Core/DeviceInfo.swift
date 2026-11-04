@@ -1,12 +1,12 @@
 import Foundation
 
 enum DeviceInfo {
-    static var hwid: String {
+    static let hwid: String = {
         if let v = Keychain.read("hwid") { return v }
         let v = UUID().uuidString.lowercased()
         Keychain.save(v, for: "hwid")
         return v
-    }
+    }()
 
     static var model: String {
         var info = utsname()
@@ -18,6 +18,14 @@ enum DeviceInfo {
     static var osVersion: String {
         let v = ProcessInfo.processInfo.operatingSystemVersion
         return "\(v.majorVersion).\(v.minorVersion)" + (v.patchVersion > 0 ? ".\(v.patchVersion)" : "")
+    }
+
+    /// «iPhone15,2» → «iPhone»: в списке устройств достаточно типа.
+    static func friendlyModel(_ raw: String) -> String {
+        for prefix in ["iPhone", "iPad", "iPod", "Mac", "AppleTV"] where raw.hasPrefix(prefix) && raw.contains(",") {
+            return prefix == "AppleTV" ? "Apple TV" : prefix
+        }
+        return raw
     }
 
     static var displayName: String {

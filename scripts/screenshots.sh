@@ -16,7 +16,7 @@ xcrun simctl install "$UDID" "$APP"
 first=1
 for theme in dark; do
   xcrun simctl ui "$UDID" appearance "$theme" || true
-  for screen in onboarding home disconnected locations subscription settings diagnostics exceptions; do
+  for screen in onboarding login home disconnected locations subscription settings diagnostics exceptions; do
     xcrun simctl terminate "$UDID" "$BUNDLE" 2>/dev/null || true
     DATA=$(xcrun simctl get_app_container "$UDID" "$BUNDLE" data)
     rm -f "$DATA/Library/Caches/shot-ready"

@@ -166,7 +166,7 @@ struct PageScroll<Content: View>: View {
                 .padding(.top, 8)
         }
         .scrollIndicators(.hidden)
-        .contentMargins(.bottom, 110, for: .scrollContent)
+        .contentMargins(.bottom, 28, for: .scrollContent)
         .background(AppBackground())
     }
 }
@@ -506,10 +506,12 @@ struct Flag: View {
 }
 
 enum Ping {
+    /// Мягкие пороги: задержка через сервер до сайта, а не ICMP-пинг.
     static func color(_ ms: Int?) -> Color {
         guard let ms else { return Theme.gray }
-        if ms < 80 { return Theme.green }
-        if ms < 160 { return Theme.orange }
+        if ms < 200 { return Theme.green }
+        if ms < 450 { return Theme.yellow }
+        if ms < 900 { return Theme.orange }
         return Theme.red
     }
     static func text(_ ms: Int?) -> String { ms.map { "\($0) мс" } ?? "—" }
@@ -567,69 +569,4 @@ struct SCFieldStyle: ViewModifier {
 
 extension View {
     func scField(focused: Bool = false) -> some View { modifier(SCFieldStyle(focused: focused)) }
-}
-
-// MARK: - Таб-бар: плавающая капсула со «стеклом», как в мини-аппе
-
-struct SCTabBar: View {
-    @Binding var selection: AppTab
-    @Namespace private var ns
-
-    private struct Item: Identifiable {
-        let tab: AppTab
-        let title: String
-        let icon: String
-        var id: AppTab { tab }
-    }
-
-    private let items: [Item] = [
-        Item(tab: .home, title: "Главная", icon: "house"),
-        Item(tab: .locations, title: "Локации", icon: "globe"),
-        Item(tab: .subscription, title: "Подписка", icon: "creditcard"),
-        Item(tab: .settings, title: "Настройки", icon: "gearshape"),
-    ]
-
-    var body: some View {
-        HStack(spacing: 0) {
-            ForEach(items) { item in
-                let tab = item.tab, title = item.title, icon = item.icon
-                let on = tab == selection
-                Button {
-                    withAnimation(.spring(response: 0.35, dampingFraction: 0.82)) { selection = tab }
-                } label: {
-                    VStack(spacing: 2) {
-                        Image(systemName: icon)
-                            .font(.system(size: 20, weight: on ? .semibold : .regular))
-                            .frame(height: 24)
-                        Text(title).font(.onest(11, .semibold, relativeTo: .caption2))
-                    }
-                    .foregroundStyle(on ? Theme.tint : Theme.label)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 54)
-                    .background {
-                        if on {
-                            Capsule().fill(Color.white.opacity(0.1))
-                                .overlay(Capsule().strokeBorder(LinearGradient(colors: [.white.opacity(0.18), .clear], startPoint: .top, endPoint: .center), lineWidth: 0.5))
-                                .matchedGeometryEffect(id: "pill", in: ns)
-                        }
-                    }
-                    .contentShape(Capsule())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(title)
-                .accessibilityAddTraits(on ? .isSelected : [])
-            }
-        }
-        .padding(5)
-        .background {
-            Capsule().fill(.ultraThinMaterial)
-                .overlay(Capsule().fill(Color(hex: 0x1E1E24, opacity: 0.55)))
-                .overlay(Capsule().strokeBorder(Color.white.opacity(0.14), lineWidth: 0.5))
-                .shadow(color: .black.opacity(0.45), radius: 20, y: 12)
-        }
-        .environment(\.colorScheme, .dark)
-        .frame(maxWidth: 400)
-        .padding(.horizontal, 20)
-        .sensoryFeedback(.selection, trigger: selection)
-    }
 }

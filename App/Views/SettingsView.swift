@@ -13,11 +13,14 @@ struct SettingsView: View {
     @AppStorage(SettingsKey.transport) private var transport: TransportPreference = .auto
     @State private var path: [SettingsRoute] = []
     @State private var appliedInitial = false
+    @State private var confirmLogout = false
 
     var body: some View {
         NavigationStack(path: $path) {
             PageScroll {
                 PageHeader(title: "Настройки")
+
+                accountSection
 
                 SCSection(header: "Подключение", footer: "Автоподключение само включит VPN, когда появится сеть. «Без VPN — без сети» не выпустит трафик мимо туннеля — применится при следующем подключении.") {
                     Menu {
@@ -74,6 +77,12 @@ struct SettingsView: View {
                 }
             }
             .toolbar(.hidden, for: .navigationBar)
+            .confirmationDialog("Выйти из аккаунта?", isPresented: $confirmLogout, titleVisibility: .visible) {
+                Button("Выйти", role: .destructive) { app.logout() }
+                Button("Отмена", role: .cancel) {}
+            } message: {
+                Text("VPN отключится. Чтобы снова пользоваться, войдите через Telegram или по ссылке.")
+            }
             .onChange(of: ruDirect) { app.settingsChanged() }
             .onChange(of: autoConnect) { _, on in app.autoConnectChanged(on) }
             .navigationDestination(for: SettingsRoute.self) { route in
@@ -88,6 +97,33 @@ struct SettingsView: View {
                 if app.isDemo, app.initialScreen == "diagnostics" { path = [.diagnostics] }
                 if app.isDemo, app.initialScreen == "exceptions" { path = [.exceptions] }
             }
+        }
+    }
+}
+
+extension SettingsView {
+    private var accountSection: some View {
+        SCSection(header: "Аккаунт", footer: app.hasSession ? nil : "Войдите через Telegram — основная подписка и резервное подключение подтянутся сами.") {
+            if app.hasSession {
+                SCRow(title: app.account?.displayName ?? "Telegram",
+                      subtitle: app.account?.username.map { "@\($0) · вход через Telegram" } ?? "вход через Telegram") {
+                    CellIcon(systemName: "person.crop.circle.fill", color: Theme.tint)
+                }
+            } else {
+                Button { app.showLogin = true } label: {
+                    SCRow(title: "Войти через Telegram", chevron: true) {
+                        CellIcon(systemName: "paperplane.fill", color: Theme.tint)
+                    }
+                }
+                .buttonStyle(RowButtonStyle())
+            }
+            SCDivider()
+            Button { confirmLogout = true } label: {
+                SCRow(title: "Выйти", titleColor: Theme.red) {
+                    CellIcon(systemName: "rectangle.portrait.and.arrow.right", color: Theme.red)
+                }
+            }
+            .buttonStyle(RowButtonStyle())
         }
     }
 }
@@ -158,7 +194,7 @@ struct ExceptionsView: View {
             .padding(.top, 12)
         }
         .scrollIndicators(.hidden)
-        .contentMargins(.bottom, 110, for: .scrollContent)
+        .contentMargins(.bottom, 28, for: .scrollContent)
         .background(AppBackground(glow: 0))
         .navigationTitle("Исключения")
         .navigationBarTitleDisplayMode(.inline)

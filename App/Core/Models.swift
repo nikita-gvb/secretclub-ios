@@ -1,35 +1,35 @@
 import Foundation
 
 enum RouteGroup: String, CaseIterable, Identifiable, Codable {
-    case regular, bridge, bypass
+    case regular, bridge, reserve
     var id: String { rawValue }
 
     var title: String {
         switch self {
         case .regular: return "Обычные"
         case .bridge: return "Мост через РФ"
-        case .bypass: return "Обход белых списков"
+        case .reserve: return "Резервное подключение"
         }
     }
     var shortTitle: String {
         switch self {
         case .regular: return "Прямое"
         case .bridge: return "Мост РФ"
-        case .bypass: return "Обход БС"
+        case .reserve: return "Резерв"
         }
     }
     var subtitle: String {
         switch self {
         case .regular: return "Прямое подключение — максимальная скорость"
         case .bridge: return "Через сервер в России, если зарубежные адреса режут"
-        case .bypass: return "Через CDN — работает, когда включены белые списки"
+        case .reserve: return "Работает, когда остальное недоступно. Трафик ограничен, поэтому «Авто» включает его только в крайнем случае."
         }
     }
     var icon: String {
         switch self {
         case .regular: return "bolt.fill"
         case .bridge: return "arrow.triangle.branch"
-        case .bypass: return "shield.lefthalf.filled"
+        case .reserve: return "lifepreserver"
         }
     }
 }
@@ -57,7 +57,7 @@ struct Route: Identifiable, Hashable {
         switch group {
         case .regular: return transportTitle
         case .bridge: return "мост · \(transportTitle)"
-        case .bypass: return "через CDN"
+        case .reserve: return "резерв"
         }
     }
 
@@ -74,7 +74,7 @@ struct Route: Identifiable, Hashable {
         switch group {
         case .regular: detail = "\(tt) · напрямую"
         case .bridge: detail = "через Россию · \(tt)"
-        case .bypass: detail = "через CDN · белые списки"
+        case .reserve: detail = "резервное · через CDN"
         }
         return Route(id: id, emoji: code.flagEmoji, title: country, detail: detail, group: group,
                      transport: transport, transportTitle: tt, remarks: country, ping: ping)
@@ -88,7 +88,7 @@ enum NetworkMode: String {
         switch self {
         case .unknown: return "Проверяем сеть…"
         case .normal: return "Обычный интернет"
-        case .whitelist: return "Белые списки"
+        case .whitelist: return "Сеть ограничена"
         case .offline: return "Нет сети"
         }
     }
@@ -96,7 +96,7 @@ enum NetworkMode: String {
         switch self {
         case .unknown: return "Проверка…"
         case .normal: return "Сеть в порядке"
-        case .whitelist: return "Белые списки"
+        case .whitelist: return "Сеть ограничена"
         case .offline: return "Нет сети"
         }
     }
@@ -104,7 +104,7 @@ enum NetworkMode: String {
         switch self {
         case .unknown: return "Определяем, какие сайты доступны в этой сети."
         case .normal: return "Открываются и российские, и зарубежные сайты. Используем самый быстрый маршрут."
-        case .whitelist: return "Доступны только сайты из белого списка. Подключаемся через CDN."
+        case .whitelist: return "Открываются только некоторые российские сайты. Подключимся через мост или резервное подключение."
         case .offline: return "Не отвечает ни один сайт. Проверьте Wi‑Fi или мобильный интернет."
         }
     }
@@ -132,12 +132,13 @@ struct DiagnosticStep: Identifiable, Hashable {
 }
 
 struct Device: Identifiable, Hashable {
-    enum Kind: String { case phone, laptop, tablet, desktop }
+    enum Kind: String { case phone, laptop, tablet, desktop, tv }
     let id: String
     let name: String
     let kind: Kind
-    let lastSeen: Date
+    let lastSeen: Date?
     let isCurrent: Bool
+    var detail: String? = nil
 
     var icon: String {
         switch kind {
@@ -145,8 +146,24 @@ struct Device: Identifiable, Hashable {
         case .laptop: return "laptopcomputer"
         case .tablet: return "ipad"
         case .desktop: return "desktopcomputer"
+        case .tv: return "appletv"
         }
     }
+}
+
+enum SubscriptionStatus: String, Hashable {
+    case active, expiring, expired, limited, disabled
+
+    var title: String {
+        switch self {
+        case .active: return "Активна"
+        case .expiring: return "Скоро закончится"
+        case .expired: return "Закончилась"
+        case .limited: return "Трафик закончился"
+        case .disabled: return "Отключена"
+        }
+    }
+    var isUsable: Bool { self == .active || self == .expiring }
 }
 
 struct SubscriptionInfo: Hashable {
@@ -156,12 +173,17 @@ struct SubscriptionInfo: Hashable {
     var limitBytes: Int64?
     var devices: [Device]
     var deviceLimit: Int?
+    var status: SubscriptionStatus = .active
+    var lifetime = false
+    /// Данные из аккаунта (а не только из заголовков подписки).
+    var fromAccount = false
 
     static let empty = SubscriptionInfo(plan: "SecretClub", expiresAt: nil, usedBytes: 0, limitBytes: nil, devices: [], deviceLimit: nil)
 
-    var isActive: Bool { expiresAt.map { $0 > Date() } ?? true }
+    var isActive: Bool { status.isUsable && (expiresAt.map { $0 > Date() || lifetime } ?? true) }
     var daysLeft: Int? {
-        expiresAt.map { max(0, Calendar.current.dateComponents([.day], from: Date(), to: $0).day ?? 0) }
+        guard !lifetime else { return nil }
+        return expiresAt.map { max(0, Int(ceil($0.timeIntervalSinceNow / 86400))) }
     }
     var progress: Double {
         guard let d = daysLeft else { return 1 }
@@ -171,6 +193,8 @@ struct SubscriptionInfo: Hashable {
         guard let d = daysLeft else { return "бессрочно" }
         return "ещё \(d) \(Format.plural(d, "день", "дня", "дней"))"
     }
+    var leftBytes: Int64? { limitBytes.map { max(0, $0 - usedBytes) } }
+    var trafficProgress: Double? { limitBytes.map { min(1, Double(usedBytes) / Double(max(1, $0))) } }
 }
 
 struct SubscriptionMeta: Codable, Hashable {
@@ -200,7 +224,27 @@ extension SubscriptionInfo {
                   expiresAt: meta.expire,
                   usedBytes: meta.upload + meta.download,
                   limitBytes: meta.total > 0 ? meta.total : nil,
-                  devices: [Device(id: "this", name: DeviceInfo.displayName, kind: .phone, lastSeen: Date(), isCurrent: true)],
+                  devices: [Device(id: DeviceInfo.hwid, name: DeviceInfo.displayName, kind: .phone, lastSeen: Date(), isCurrent: true)],
                   deviceLimit: nil)
+        lifetime = (meta.expire?.timeIntervalSinceNow ?? 0) > 50 * 365 * 86400
+        if let expire = meta.expire, expire <= Date(), !lifetime {
+            status = .expired
+        } else if let limit = limitBytes, usedBytes >= limit {
+            status = .limited
+        } else if let d = daysLeft, d <= 3 {
+            status = .expiring
+        }
+    }
+
+    init(account s: AccountSubscription) {
+        self.init(plan: s.kind == "trial" ? "Пробный период" : "SecretClub",
+                  expiresAt: s.lifetime ? nil : s.expireAt,
+                  usedBytes: s.usedBytes,
+                  limitBytes: s.totalBytes,
+                  devices: s.devices.map(\.device),
+                  deviceLimit: s.deviceLimit)
+        status = s.status
+        lifetime = s.lifetime
+        fromAccount = true
     }
 }

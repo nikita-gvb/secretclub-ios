@@ -8,17 +8,25 @@ struct HomeView: View {
             PageHeader(title: "SecretClub") {
                 NetworkChip(mode: app.networkMode)
             }
-            ConnectionHero()
+            if app.needsConsent {
+                ConsentCard()
+            } else if app.needsSubscription && app.routes.isEmpty {
+                NoSubscriptionCard()
+            } else {
+                ConnectionHero()
+            }
             if let error = app.vpn.lastError {
                 NoticeCard(text: error, icon: "exclamationmark.triangle.fill", color: Theme.orange)
-            } else if app.routes.isEmpty, let error = app.refreshError {
+            } else if app.routes.isEmpty, let error = app.refreshError ?? app.accountError {
                 NoticeCard(text: error, icon: "exclamationmark.triangle.fill", color: Theme.orange)
             }
-            if let announce = app.meta?.announce {
+            if let announce = app.meta?.announce ?? app.account?.announcement {
                 NoticeCard(text: announce, icon: "megaphone.fill", color: Theme.tint)
             }
-            connectionSection
-            subscriptionSection
+            if !app.routes.isEmpty || !app.needsConsent && !app.needsSubscription {
+                connectionSection
+                subscriptionSection
+            }
         }
         .refreshable { await app.refreshSubscription() }
     }
@@ -58,11 +66,22 @@ struct HomeView: View {
         }
         return SCSection(header: "Подписка") {
             Button { app.selectedTab = .subscription } label: {
-                SCRow(title: sub.isActive ? "Активна" : "Закончилась", subtitle: sub.plan, value: value, chevron: true) {
+                SCRow(title: sub.status.title, subtitle: sub.plan, value: value, chevron: true) {
                     CellIcon(systemName: "creditcard")
                 }
             }
             .buttonStyle(RowButtonStyle())
+            if let reserve = app.reserve {
+                SCDivider()
+                Button { app.selectedTab = .subscription } label: {
+                    SCRow(title: "Резервное подключение",
+                          subtitle: reserve.status.isUsable ? "включается, если остальное не работает" : reserve.status.title,
+                          value: reserve.leftBytes.map(Format.bytes), chevron: true) {
+                        CellIcon(systemName: "lifepreserver")
+                    }
+                }
+                .buttonStyle(RowButtonStyle())
+            }
         }
     }
 }

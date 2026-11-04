@@ -4,6 +4,10 @@ import Security
 enum Keychain {
     static let service = "com.secretclub.app"
     static let subscriptionKey = "subscriptionURL"
+    /// Ссылка на подписку резервного подключения.
+    static let reserveKey = "reserveSubscriptionURL"
+    /// Токен приложения (sca_…), выданный после входа через Telegram.
+    static let sessionKey = "sessionToken"
 
     private static func base(_ key: String) -> [String: Any] {
         [kSecClass as String: kSecClassGenericPassword,

@@ -24,6 +24,16 @@ enum SubscriptionError: LocalizedError {
 struct ParsedSubscription {
     var routes: [Route]
     var configs: [String: [String: Any]]
+
+    static let empty = ParsedSubscription(routes: [], configs: [:])
+}
+
+/// Основная подписка и резервное подключение (отдельная подписка с ограниченным трафиком).
+enum SubscriptionSlot: String {
+    case primary, reserve
+
+    var keychainKey: String { self == .primary ? Keychain.subscriptionKey : Keychain.reserveKey }
+    var filePrefix: String { self == .primary ? "" : "reserve-" }
 }
 
 enum SubscriptionService {
@@ -78,7 +88,7 @@ enum SubscriptionService {
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    static func parse(_ data: Data) throws -> ParsedSubscription {
+    static func parse(_ data: Data, slot: SubscriptionSlot = .primary) throws -> ParsedSubscription {
         let object = try? JSONSerialization.jsonObject(with: data)
         let list: [[String: Any]]
         if let array = object as? [[String: Any]] {
@@ -96,11 +106,12 @@ enum SubscriptionService {
             guard let outbounds = cfg["outbounds"] as? [[String: Any]],
                   let proxy = RouteClassifier.mainOutbound(outbounds),
                   !RouteClassifier.isPlaceholder(proxy),
-                  !RouteClassifier.isPlaceholder(remarks: remarks) else { continue }
-            var id = remarks
+                  !RouteClassifier.isPlaceholder(remarks: remarks),
+                  !RouteClassifier.isHidden(remarks: remarks, config: cfg) else { continue }
+            var id = slot == .reserve ? "r|" + remarks : remarks
             if seen.contains(id) { id += "#\(index)" }
             seen.insert(id)
-            routes.append(RouteClassifier.route(id: id, remarks: remarks, proxy: proxy))
+            routes.append(RouteClassifier.route(id: id, remarks: remarks, proxy: proxy, reserve: slot == .reserve))
             configs[id] = cfg
         }
         if routes.isEmpty { throw SubscriptionError.noServers(list.first?["remarks"] as? String) }
@@ -117,18 +128,24 @@ enum SubscriptionService {
         return dir
     }
 
-    static func save(data: Data, meta: SubscriptionMeta) {
-        try? data.write(to: directory.appendingPathComponent("configs.json"), options: .atomic)
+    static func save(data: Data?, meta: SubscriptionMeta, slot: SubscriptionSlot = .primary) {
+        let configsURL = directory.appendingPathComponent(slot.filePrefix + "configs.json")
+        if let data { try? data.write(to: configsURL, options: .atomic) } else { try? FileManager.default.removeItem(at: configsURL) }
         if let encoded = try? JSONEncoder().encode(meta) {
-            try? encoded.write(to: directory.appendingPathComponent("meta.json"), options: .atomic)
+            try? encoded.write(to: directory.appendingPathComponent(slot.filePrefix + "meta.json"), options: .atomic)
         }
     }
 
-    static func loadCache() -> (Data, SubscriptionMeta)? {
-        guard let data = try? Data(contentsOf: directory.appendingPathComponent("configs.json")),
-              let metaData = try? Data(contentsOf: directory.appendingPathComponent("meta.json")),
+    static func loadCache(_ slot: SubscriptionSlot = .primary) -> (Data?, SubscriptionMeta)? {
+        guard let metaData = try? Data(contentsOf: directory.appendingPathComponent(slot.filePrefix + "meta.json")),
               let meta = try? JSONDecoder().decode(SubscriptionMeta.self, from: metaData) else { return nil }
-        return (data, meta)
+        return (try? Data(contentsOf: directory.appendingPathComponent(slot.filePrefix + "configs.json")), meta)
+    }
+
+    static func clearCache(_ slot: SubscriptionSlot) {
+        for name in ["configs.json", "meta.json"] {
+            try? FileManager.default.removeItem(at: directory.appendingPathComponent(slot.filePrefix + name))
+        }
     }
 
     static func clearCache() {
@@ -152,11 +169,38 @@ enum RouteClassifier {
         return ""
     }
 
+    static func port(_ outbound: [String: Any]) -> Int {
+        let settings = outbound["settings"] as? [String: Any]
+        let raw: Any? = (settings?["vnext"] as? [[String: Any]])?.first?["port"]
+            ?? (settings?["servers"] as? [[String: Any]])?.first?["port"]
+            ?? settings?["port"]
+        if let n = raw as? NSNumber { return n.intValue }
+        if let s = raw as? String {
+            let digits = s.prefix { $0.isNumber }
+            return Int(digits) ?? 0
+        }
+        return 0
+    }
+
     /// Заглушки Remnawave: «❗️ Данное приложение не поддерживается», «Лимит устройств» и т. п.
     static func isPlaceholder(remarks: String) -> Bool {
         let lower = remarks.lowercased()
         return remarks.hasPrefix("❗") || lower.contains("не поддерживается") || lower.contains("лимит устройств")
             || lower.contains("подписка истекла") || lower.contains("expired")
+    }
+
+    /// Не показываем: «Авто-выбор» для Happ (балансировщик) и «Резервный доступ (FAQ)».
+    static func isHidden(remarks: String, config: [String: Any]) -> Bool {
+        let lower = remarks.lowercased()
+        if lower.contains("авто-выбор") || lower.contains("автовыбор") || lower.contains("auto-select") { return true }
+        if remarks.hasPrefix("🆘") || lower.contains("резервный доступ") || lower.contains("faq") { return true }
+        if remarks.hasPrefix("BAL-") { return true }
+        let routing = config["routing"] as? [String: Any]
+        let balancers = routing?["balancers"] as? [[String: Any]] ?? []
+        let proxies = (config["outbounds"] as? [[String: Any]] ?? []).filter {
+            !["freedom", "blackhole", "dns", "loopback"].contains(($0["protocol"] as? String ?? "").lowercased())
+        }
+        return !balancers.isEmpty && proxies.count > 1
     }
 
     /// Одинаковые названия в одной группе нумеруем: «Финляндия», «Финляндия · 2».
@@ -175,7 +219,7 @@ enum RouteClassifier {
         return a.isEmpty || a == "0.0.0.0"
     }
 
-    static func route(id: String, remarks: String, proxy: [String: Any]) -> Route {
+    static func route(id: String, remarks: String, proxy: [String: Any], reserve: Bool = false) -> Route {
         let text = remarks
             .replacingOccurrences(of: #"\s*\^~\d+~\^"#, with: "", options: .regularExpression)
             .trimmingCharacters(in: .whitespaces)
@@ -184,8 +228,8 @@ enum RouteClassifier {
         let addr = address(proxy).lowercased()
 
         let group: RouteGroup
-        if lower.contains("обход") || lower.contains(" бс") || lower.contains("cdn") || lower.contains("резерв") {
-            group = .bypass
+        if reserve || lower.contains("обход") || lower.contains(" бс") || lower.contains("cdn") {
+            group = .reserve
         } else if lower.contains("мост") || lower.contains("через рф") || addr.contains("ru-entry") {
             group = .bridge
         } else {
@@ -196,20 +240,20 @@ enum RouteClassifier {
         var title = rest
         if let code = regionCode(emoji), let name = Locale(identifier: "ru_RU").localizedString(forRegionCode: code) {
             title = name
-            let dupPattern = group == .bypass ? #"\((\d)\)\s*$"# : #"\((\d)\)"#
+            let dupPattern = group == .reserve ? #"\((\d)\)\s*$"# : #"\((\d)\)"#
             if let n = firstMatch(dupPattern, in: rest) { title += " \(n)" }
         }
 
         let speed = firstMatch(#"(?i)(\d+)\s*/\s*GBIT"#, in: rest).map { "\($0) Гбит/с" }
-        let variant = group == .bypass ? firstMatch(#"\(([^)]*[A-Za-z][^)]*|\d+)\)"#, in: rest) : nil
+        let variant = group == .reserve ? firstMatch(#"\(([^)]*[A-Za-z][^)]*|\d+)\)"#, in: rest) : nil
         var parts: [String]
         switch group {
         case .regular: parts = [transportTitle]
         case .bridge: parts = ["через Россию", transportTitle]
-        case .bypass: parts = ["через CDN"]
+        case .reserve: parts = ["через CDN"]
         }
         if let speed { parts.append(speed) }
-        if let variant, variant.count > 1 || group == .bypass { parts.append(variant) }
+        if let variant, variant.count > 1 || group == .reserve { parts.append(variant) }
 
         return Route(id: id,
                      emoji: emoji.isEmpty ? "🌐" : emoji,
@@ -218,8 +262,7 @@ enum RouteClassifier {
                      group: group,
                      transport: transport,
                      transportTitle: transportTitle,
-                     remarks: remarks,
-                     isAutoBalancer: lower.contains("авто"))
+                     remarks: remarks)
     }
 
     static func transportOf(_ outbound: [String: Any], group: RouteGroup) -> (TransportKind, String) {
@@ -229,7 +272,7 @@ enum RouteClassifier {
         let security = (stream["security"] as? String ?? "none").lowercased()
         if proto.contains("hysteria") || network.contains("hysteria") { return (.hysteria2, "Hysteria2") }
         if security == "reality" { return (.reality, network == "xhttp" ? "Reality · XHTTP" : "Reality") }
-        if network == "xhttp" || network == "splithttp" { return (group == .bypass ? .cdn : .xhttp, "XHTTP") }
+        if network == "xhttp" || network == "splithttp" { return (group == .reserve ? .cdn : .xhttp, "XHTTP") }
         switch network {
         case "ws": return (.other, "WebSocket")
         case "grpc": return (.other, "gRPC")

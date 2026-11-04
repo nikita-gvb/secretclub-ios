@@ -89,6 +89,65 @@ enum ConfigBuilder {
         return (json, main["tag"] as? String ?? "proxy")
     }
 
+    /// Один конфиг Xray для пинга многих серверов сразу: у каждого сервера свой HTTP-вход
+    /// на 127.0.0.1 и свои outbounds (теги с префиксом, чтобы не пересекались).
+    static func pingBundle(_ items: [(id: String, raw: [String: Any])], ports: [Int]) -> (json: String, ports: [String: Int])? {
+        var inbounds: [[String: Any]] = []
+        var outbounds: [[String: Any]] = [["tag": "ping-block", "protocol": "blackhole"]]
+        var rules: [[String: Any]] = []
+        var map: [String: Int] = [:]
+        let skipped: Set<String> = ["dns", "loopback"]
+        for (index, item) in items.enumerated() where index < ports.count {
+            guard let list = item.raw["outbounds"] as? [[String: Any]],
+                  let main = RouteClassifier.mainOutbound(list) else { continue }
+            let prefix = "p\(index)-"
+            let mainTag = prefix + (main["tag"] as? String ?? "proxy")
+            for outbound in list {
+                let proto = (outbound["protocol"] as? String ?? "").lowercased()
+                if skipped.contains(proto) { continue }
+                var o = outbound
+                o["tag"] = prefix + (outbound["tag"] as? String ?? "proxy")
+                if var stream = o["streamSettings"] as? [String: Any],
+                   var sock = stream["sockopt"] as? [String: Any],
+                   let dialer = sock["dialerProxy"] as? String, !dialer.isEmpty {
+                    sock["dialerProxy"] = prefix + dialer
+                    stream["sockopt"] = sock
+                    o["streamSettings"] = stream
+                }
+                if var proxy = o["proxySettings"] as? [String: Any], let tag = proxy["tag"] as? String {
+                    proxy["tag"] = prefix + tag
+                    o["proxySettings"] = proxy
+                }
+                outbounds.append(o)
+            }
+            let inTag = "in\(index)"
+            inbounds.append(["tag": inTag, "listen": "127.0.0.1", "port": ports[index], "protocol": "http",
+                             "settings": [String: Any]()])
+            rules.append(["type": "field", "inboundTag": [inTag], "outboundTag": mainTag])
+            map[item.id] = ports[index]
+        }
+        guard !map.isEmpty else { return nil }
+        let config: [String: Any] = [
+            "log": ["loglevel": "none", "access": "none"],
+            "inbounds": inbounds,
+            "outbounds": outbounds,
+            "routing": ["domainStrategy": "AsIs", "rules": rules],
+        ]
+        guard let text = json(config) else { return nil }
+        return (text, map)
+    }
+
+    /// Адрес и порт основного сервера — для замера из расширения.
+    static func pingTarget(id: String, raw: [String: Any], udp: Bool) -> PingTarget? {
+        guard let list = raw["outbounds"] as? [[String: Any]], let main = RouteClassifier.mainOutbound(list) else { return nil }
+        let host = RouteClassifier.address(main)
+        let port = RouteClassifier.port(main)
+        guard !host.isEmpty, port > 0 else { return nil }
+        let stream = main["streamSettings"] as? [String: Any]
+        let tls = (stream?["tlsSettings"] as? [String: Any]) ?? (stream?["realitySettings"] as? [String: Any])
+        return PingTarget(id: id, host: host, port: port, udp: udp, sni: tls?["serverName"] as? String)
+    }
+
     /// Куда отправлять «всегда через VPN»: балансировщик или основной outbound.
     static func proxyTarget(outbounds: [[String: Any]], rules: [[String: Any]]) -> [String: Any] {
         let matcherFree: Set<String> = ["type", "network", "outboundTag", "balancerTag", "ruleTag"]

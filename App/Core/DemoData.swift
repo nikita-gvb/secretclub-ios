@@ -14,30 +14,58 @@ enum DemoData {
         r("pl-hy", "🇵🇱", "Польша", .regular, .hysteria2, "Hysteria2", "Hysteria2 · 1 Гбит/с", 54),
         r("de-hy", "🇩🇪", "Германия 2", .regular, .hysteria2, "Hysteria2", "Hysteria2 · 1 Гбит/с", 61),
         r("ua", "🇺🇦", "Украина", .regular, .reality, "Reality", "Reality", nil),
-        r("auto", "🌍", "Авто-выбор", .bridge, .xhttp, "XHTTP", "через Россию · XHTTP", 64),
         r("fi-x", "🇫🇮", "Финляндия", .bridge, .xhttp, "XHTTP", "через Россию · XHTTP · 5 Гбит/с", 69),
         r("fi-tcp", "🇫🇮", "Финляндия", .bridge, .reality, "Reality", "через Россию · Reality · 5 Гбит/с", 71),
         r("pl-x", "🇵🇱", "Польша", .bridge, .xhttp, "XHTTP", "через Россию · XHTTP · 1 Гбит/с", 77),
-        r("fi-cdn", "🇫🇮", "Финляндия", .bypass, .cdn, "XHTTP", "через CDN · TF-2", 96),
-        r("se-cdn", "🇸🇪", "Швеция", .bypass, .cdn, "XHTTP", "через CDN · TF-2", 104),
-        r("de-cdn", "🇩🇪", "Германия", .bypass, .cdn, "XHTTP", "через CDN · TF-2", 118),
-        r("ru-cdn", "🇷🇺", "Россия", .bypass, .cdn, "XHTTP", "через CDN · 6", 31),
+        r("r|fi-cdn", "🇫🇮", "Финляндия", .reserve, .cdn, "XHTTP", "через CDN · TF-2", 96),
+        r("se-cdn", "🇸🇪", "Швеция", .reserve, .cdn, "XHTTP", "через CDN · TF-2", 104),
+        r("de-cdn", "🇩🇪", "Германия", .reserve, .cdn, "XHTTP", "через CDN · TF-2", 118),
+        r("ru-cdn", "🇷🇺", "Россия", .reserve, .cdn, "XHTTP", "через CDN · 6", 31),
     ]
 
+    private static func ms(_ offset: TimeInterval) -> Int64 { Int64(Date().addingTimeInterval(offset).timeIntervalSince1970 * 1000) }
+    private static func iso(_ offset: TimeInterval) -> String {
+        ISO8601DateFormatter().string(from: Date().addingTimeInterval(offset))
+    }
+
+    static var accountJSON: [String: Any] {
+        [
+            "user": ["telegramId": "100200300", "username": "secretclub_demo", "firstName": "Никита"],
+            "consent": ["accepted": true, "version": "2026-01", "terms": "https://lk.scvpn.app/terms.html", "privacy": "https://lk.scvpn.app/privacy.html"] as [String: Any],
+            "links": ["botUsername": "secvmbot", "support": "https://t.me/aioap"],
+            "hasSubscription": true,
+            "subscription": [
+                "url": "https://sub.scvpn.app/demo", "kind": "paid", "status": "active", "daysLeft": 24,
+                "lifetime": false, "expireAt": ms(23 * 86400 + 3600), "usedBytes": 19_756_000_000,
+                "deviceCount": 3, "deviceLimit": 5,
+                "devices": [
+                    ["hwid": DeviceInfo.hwid, "platform": "iOS", "osVersion": "26.1", "deviceModel": "iPhone17,1", "updatedAt": iso(0)],
+                    ["hwid": "mac-1", "platform": "macOS", "osVersion": "15.5", "deviceModel": "MacBook Air", "updatedAt": iso(-3 * 3600)],
+                    ["hwid": "ipad-1", "platform": "iPadOS", "osVersion": "18.4", "deviceModel": "iPad14,1", "updatedAt": iso(-2 * 86400)],
+                ],
+            ] as [String: Any],
+            "extra": [
+                "url": "https://sub.scvpn.app/demo-reserve", "kind": "paid", "status": "active", "lifetime": true,
+                "usedBytes": 61_000_000, "totalBytes": 209_715_200, "deviceCount": 1, "deviceLimit": 5, "devices": [[String: Any]](),
+            ] as [String: Any],
+            "trial": ["available": false, "days": 7] as [String: Any],
+            "freeExtraMb": 200,
+        ]
+    }
+
+    static var account: AccountMe { AccountMe(json: accountJSON) }
+
     static var subscription: SubscriptionInfo {
-        let now = Date()
-        return SubscriptionInfo(
-            plan: "Premium",
-            expiresAt: now.addingTimeInterval(23 * 86400 + 3600),
-            usedBytes: 19_756_000_000,
-            limitBytes: nil,
-            devices: [
-                Device(id: "1", name: "iPhone · iOS 26.1", kind: .phone, lastSeen: now, isCurrent: true),
-                Device(id: "2", name: "MacBook Air", kind: .laptop, lastSeen: now.addingTimeInterval(-3 * 3600), isCurrent: false),
-                Device(id: "3", name: "iPad", kind: .tablet, lastSeen: now.addingTimeInterval(-2 * 86400), isCurrent: false),
-            ],
-            deviceLimit: 5
-        )
+        account.subscription.map(SubscriptionInfo.init(account:)) ?? .empty
+    }
+
+    static var reserve: SubscriptionInfo? {
+        account.reserve.map(SubscriptionInfo.init(account:))
+    }
+
+    static var loginTicket: LoginTicket {
+        LoginTicket(code: "demo", verifier: "demo", botURL: URL(string: "https://t.me/secvmbot?start=app_demo")!,
+                    tgURL: nil, expiresAt: Date().addingTimeInterval(300))
     }
 
     static let probes: [ProbeResult] = [

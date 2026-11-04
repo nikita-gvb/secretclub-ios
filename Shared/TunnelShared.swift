@@ -11,12 +11,23 @@ enum TunnelOption {
     static let probe = "probe"
 }
 
+/// Сервер для замера задержки из расширения (мимо туннеля).
+struct PingTarget: Codable, Hashable {
+    var id: String
+    var host: String
+    var port: Int
+    /// Hysteria2 и прочие QUIC-серверы: меряем QUIC-рукопожатие вместо TCP.
+    var udp = false
+    var sni: String? = nil
+}
+
 struct TunnelCommand: Codable {
-    enum Kind: String, Codable { case status, reload }
+    enum Kind: String, Codable { case status, reload, ping }
     var kind: Kind
     var config: String? = nil
     var routeID: String? = nil
     var routeTitle: String? = nil
+    var targets: [PingTarget]? = nil
 }
 
 struct TunnelReport: Codable, Equatable {
@@ -30,6 +41,8 @@ struct TunnelReport: Codable, Equatable {
     var downlink: Int64 = 0
     var memoryMB: Double?
     var error: String?
+    /// Ответ на команду ping: id сервера → мс.
+    var pings: [String: Int]? = nil
 }
 
 enum TunnelCoding {

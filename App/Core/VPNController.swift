@@ -392,17 +392,3 @@ final class VPNController {
         return ns.localizedDescription
     }
 }
-
-/// Продолжение, которое можно безопасно «возобновить» несколько раз (срабатывает первое).
-final class ResumeOnce<T>: @unchecked Sendable {
-    private var continuation: CheckedContinuation<T, Never>?
-    private let lock = NSLock()
-    init(_ continuation: CheckedContinuation<T, Never>) { self.continuation = continuation }
-    func resume(_ value: T) {
-        lock.lock()
-        let c = continuation
-        continuation = nil
-        lock.unlock()
-        c?.resume(returning: value)
-    }
-}

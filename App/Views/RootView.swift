@@ -5,6 +5,7 @@ struct RootView: View {
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
+        @Bindable var app = app
         Group {
             if app.isLoggedIn {
                 MainTabView()
@@ -15,6 +16,9 @@ struct RootView: View {
             }
         }
         .animation(.easeInOut(duration: 0.3), value: app.isLoggedIn)
+        .sheet(isPresented: $app.showLogin, onDismiss: { app.cancelLogin() }) {
+            TelegramLoginSheet()
+        }
         .task {
             await app.start()
             if app.isDemo { await Self.markRendered() }
@@ -38,25 +42,27 @@ extension RootView {
     }
 }
 
+/// Системный таб-бар iOS (на iOS 26 — Liquid Glass), остальное — в стиле SecretClub.
 struct MainTabView: View {
     @Environment(AppModel.self) private var app
 
     var body: some View {
         @Bindable var app = app
-        ZStack(alignment: .bottom) {
-            Group {
-                switch app.selectedTab {
-                case .home: HomeView()
-                case .locations: LocationsView()
-                case .subscription: SubscriptionView()
-                case .settings: SettingsView()
-                }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            SCTabBar(selection: $app.selectedTab)
-                .padding(.bottom, 2)
+        TabView(selection: $app.selectedTab) {
+            HomeView()
+                .tabItem { Label("Главная", systemImage: "house") }
+                .tag(AppTab.home)
+            LocationsView()
+                .tabItem { Label("Локации", systemImage: "globe") }
+                .tag(AppTab.locations)
+            SubscriptionView()
+                .tabItem { Label("Подписка", systemImage: "creditcard") }
+                .tag(AppTab.subscription)
+            SettingsView()
+                .tabItem { Label("Настройки", systemImage: "gearshape") }
+                .tag(AppTab.settings)
         }
-        .background(Theme.background.ignoresSafeArea())
-        .ignoresSafeArea(.keyboard)
+        .tint(Theme.tint)
+        .sensoryFeedback(.selection, trigger: app.selectedTab)
     }
 }

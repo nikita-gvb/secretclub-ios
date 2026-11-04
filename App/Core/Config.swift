@@ -1,10 +1,19 @@
 import SwiftUI
 
 enum Config {
-    /// TODO: заменить на реальный username бота.
-    static let botUsername = "secretclub_bot"
+    /// Бот SecretClub. Бэкенд может прислать другой username — тогда берём его.
+    static var botUsername: String {
+        let saved = UserDefaults.standard.string(forKey: "botUsername") ?? ""
+        return saved.isEmpty ? "secvmbot" : saved
+    }
     static var botURL: URL { URL(string: "https://t.me/\(botUsername)")! }
-    static var botLoginURL: URL { URL(string: "https://t.me/\(botUsername)?start=app")! }
+    /// Открыть нужный экран бота: buy, traffic, devices, extra…
+    static func botURL(start: String) -> URL { URL(string: "https://t.me/\(botUsername)?start=\(start)")! }
+    /// Бэкенд аккаунта (мини-апп). Для отладки можно переопределить ключом apiBase.
+    static var apiBase: String {
+        let saved = UserDefaults.standard.string(forKey: "apiBase") ?? ""
+        return saved.isEmpty ? "https://lk.scvpn.app" : saved
+    }
     /// Поддержка: из заголовка support-url подписки, иначе — через бота.
     static var supportURL: URL {
         if let s = UserDefaults.standard.string(forKey: "supportURL"), let url = URL(string: s) { return url }

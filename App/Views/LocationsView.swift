@@ -2,6 +2,8 @@ import SwiftUI
 
 struct LocationsView: View {
     @Environment(AppModel.self) private var app
+    @Environment(\.openURL) private var openURL
+    @State private var showReserveLink = false
 
     var body: some View {
         PageScroll {
@@ -29,8 +31,11 @@ struct LocationsView: View {
                     section(group)
                 }
             }
-            if app.vpn.isActive && !app.isDemo {
-                Text("Пока VPN включён, пинг не обновляется — он измерялся бы через сам туннель.")
+            if !app.routes.isEmpty && !app.hasReserveRoutes {
+                reservePlaceholder
+            }
+            if app.vpn.state == .connected && !app.isDemo {
+                Text("Пока VPN включён, пинг показывает время до самого сервера — замер идёт мимо туннеля.")
                     .font(.scFoot)
                     .foregroundStyle(Theme.label3)
                     .multilineTextAlignment(.center)
@@ -44,6 +49,42 @@ struct LocationsView: View {
             await app.pingAll()
         }
         .task { await app.pingIfStale() }
+        .sheet(isPresented: $showReserveLink) { PasteLinkSheet(reserve: true) }
+    }
+
+    /// Резервного подключения ещё нет или в нём закончился трафик.
+    @ViewBuilder private var reservePlaceholder: some View {
+        let group = RouteGroup.reserve
+        if let reserve = app.reserve {
+            SCSection(header: group.title, footer: group.subtitle) {
+                Button { openURL(Config.botURL(start: "traffic")) } label: {
+                    SCRow(title: reserve.status.isUsable ? "Серверы не загрузились" : reserve.status.title,
+                          subtitle: reserve.status.isUsable ? app.reserveError : "Докупите трафик в боте", chevron: true) {
+                        CellIcon(systemName: group.icon, color: Theme.orange)
+                    }
+                }
+                .buttonStyle(RowButtonStyle())
+            }
+        } else if let account = app.account, account.consentAccepted {
+            SCSection(header: group.title, footer: group.subtitle) {
+                Button { Task { await app.createReserve() } } label: {
+                    SCRow(title: "Подключить бесплатно", subtitle: "\(account.freeReserveMB) МБ в подарок") {
+                        CellIcon(systemName: "gift", color: Theme.tint)
+                    } trailing: {
+                        if app.busyAction == "reserve" { ProgressView() }
+                    }
+                }
+                .buttonStyle(RowButtonStyle())
+                .disabled(app.busyAction != nil)
+            }
+        } else if !app.hasSession {
+            SCSection(header: group.title, footer: group.subtitle) {
+                Button { showReserveLink = true } label: {
+                    SCRow(title: "Добавить ссылку", chevron: true) { CellIcon(systemName: "link") }
+                }
+                .buttonStyle(RowButtonStyle())
+            }
+        }
     }
 
     private var autoOption: some View {
@@ -54,7 +95,7 @@ struct LocationsView: View {
                 CellIcon(systemName: "sparkles", color: Theme.tint, size: 34)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Авто").font(.scHeadline).foregroundStyle(Theme.label)
-                    Text("Проверит сеть и подключит к самому быстрому рабочему серверу")
+                    Text("Проверит сеть и подключит к самому быстрому рабочему серверу. Резерв — только если остальное не работает.")
                         .font(.scFoot)
                         .foregroundStyle(Theme.label2)
                         .multilineTextAlignment(.leading)
@@ -89,6 +130,7 @@ struct LocationsView: View {
             ForEach(Array(items.enumerated()), id: \.element.id) { index, route in
                 if index > 0 { SCDivider(inset: 58) }
                 RouteRow(route: route,
+                         pinging: app.pingingIDs.contains(route.id),
                          selected: !app.autoMode && app.selectedRouteID == route.id,
                          connected: app.vpn.state == .connected && app.connectedRouteID == route.id) {
                     app.select(route)
@@ -100,6 +142,7 @@ struct LocationsView: View {
 
 struct RouteRow: View {
     let route: Route
+    var pinging = false
     let selected: Bool
     var connected = false
     let action: () -> Void
@@ -109,7 +152,9 @@ struct RouteRow: View {
             SCRow(title: route.title, subtitle: route.detail) {
                 Flag(emoji: route.emoji)
             } trailing: {
-                if route.unavailable {
+                if pinging {
+                    ProgressView().controlSize(.small).tint(Theme.label2).frame(minWidth: 40, alignment: .trailing)
+                } else if route.unavailable {
                     Text("нет ответа").font(.scSub).foregroundStyle(Theme.label3)
                 } else {
                     PingLabel(ms: route.ping)

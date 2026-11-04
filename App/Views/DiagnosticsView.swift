@@ -22,7 +22,7 @@ struct DiagnosticsView: View {
             .padding(.top, 12)
         }
         .scrollIndicators(.hidden)
-        .contentMargins(.bottom, 110, for: .scrollContent)
+        .contentMargins(.bottom, 28, for: .scrollContent)
         .background(AppBackground(glow: 0))
         .navigationTitle("Диагностика")
         .navigationBarTitleDisplayMode(.inline)

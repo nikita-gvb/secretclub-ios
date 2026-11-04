@@ -73,6 +73,17 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             refreshStats {
                 completionHandler?(TunnelCoding.encode(self.report))
             }
+        case .ping:
+            // Свои соединения расширения идут мимо туннеля — замер честный.
+            let targets = command.targets ?? []
+            Task {
+                let results = await LatencyProbe.direct(targets, timeout: 3)
+                self.work.async {
+                    var reply = self.report
+                    reply.pings = results
+                    completionHandler?(TunnelCoding.encode(reply))
+                }
+            }
         case .reload:
             guard let config = command.config else {
                 work.async { completionHandler?(TunnelCoding.encode(self.report)) }

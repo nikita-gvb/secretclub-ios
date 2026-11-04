@@ -1,0 +1,89 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tools
+        run: |
+          xcodebuild -version
+          brew install xcodegen
+          xcodegen --version
+
+      - name: Generate project
+        run: xcodegen generate
+
+      - name: Pick simulator
+        run: |
+          UDID=$(xcrun simctl list devices available -j | jq -r '
+            [.devices | to_entries[] | select(.key | test("iOS")) | .value[] | select(.name | test("^iPhone [0-9]+ Pro$"))]
+            | last | .udid // empty')
+          if [ -z "$UDID" ]; then
+            UDID=$(xcrun simctl list devices available -j | jq -r '[.devices | to_entries[] | select(.key | test("iOS")) | .value[] | select(.name | test("^iPhone"))] | last | .udid')
+          fi
+          echo "UDID=$UDID" >> "$GITHUB_ENV"
+          xcrun simctl list devices available | grep "$UDID"
+
+      - name: Build for simulator
+        run: |
+          mkdir -p build
+          if ! xcodebuild -project SecretClub.xcodeproj -scheme SecretClub -configuration Debug \
+               -destination "platform=iOS Simulator,id=$UDID" -derivedDataPath build/sim \
+               CODE_SIGNING_ALLOWED=NO build > build/sim.log 2>&1; then
+            grep -E "error:|fatal|BUILD FAILED" build/sim.log | head -80
+            exit 1
+          fi
+          grep -E "warning:" build/sim.log | grep -v "^ld:" | sort -u | head -40 || true
+          echo "Simulator build OK"
+
+      - name: Screenshots
+        run: |
+          ./scripts/screenshots.sh build/sim/Build/Products/Debug-iphonesimulator/SecretClub.app "$UDID" shots
+
+      - name: Build unsigned IPA
+        run: |
+          if ! xcodebuild -project SecretClub.xcodeproj -scheme SecretClub -configuration Release \
+               -sdk iphoneos -destination "generic/platform=iOS" -derivedDataPath build/dev \
+               CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build > build/dev.log 2>&1; then
+            grep -E "error:|fatal|BUILD FAILED" build/dev.log | head -80
+            exit 1
+          fi
+          APP=build/dev/Build/Products/Release-iphoneos/SecretClub.app
+          # ad-hoc подпись с entitlements, чтобы сервисы переподписи видели нужные права (Network Extension)
+          codesign --force --sign - --entitlements Support/PacketTunnel.entitlements "$APP/PlugIns/PacketTunnel.appex"
+          codesign --force --sign - --entitlements Support/SecretClub.entitlements "$APP"
+          rm -rf ipa && mkdir -p ipa/Payload && cp -R "$APP" ipa/Payload/
+          (cd ipa && zip -qry ../SecretClub-unsigned.ipa Payload)
+          ls -la SecretClub-unsigned.ipa
+          codesign -d --entitlements - "$APP/PlugIns/PacketTunnel.appex" 2>/dev/null | tail -5 || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: screenshots
+          path: shots/*.png
+          if-no-files-found: warn
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SecretClub-unsigned-ipa
+          path: SecretClub-unsigned.ipa
+          if-no-files-found: warn
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: build-logs
+          path: build/*.log
+          if-no-files-found: ignore

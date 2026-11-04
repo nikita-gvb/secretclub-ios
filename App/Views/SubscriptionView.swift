@@ -105,7 +105,7 @@ struct SubscriptionView: View {
                 }
             }
             HStack(spacing: 10) {
-                Button("Продлить") { openURL(Config.botURL(start: "buy")) }
+                Button("Продлить") { openURL(Config.botLink(start: "buy")) }
                     .buttonStyle(.scPrimary)
                 if app.isRefreshing {
                     ProgressView().tint(Theme.tint).frame(width: 50, height: 50)
@@ -142,7 +142,7 @@ struct SubscriptionView: View {
             SCSection(header: "Резервное подключение", footer: reserveFooter) {
                 ReserveSummary(info: reserve)
                 SCDivider()
-                Button { openURL(Config.botURL(start: "traffic")) } label: {
+                Button { openURL(Config.botLink(start: "traffic")) } label: {
                     SCRow(title: "Докупить трафик", chevron: true) { CellIcon(systemName: "plus") }
                 }
                 .buttonStyle(RowButtonStyle())

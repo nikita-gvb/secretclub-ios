@@ -25,11 +25,17 @@ enum PingService {
             var pending = order.makeIterator()
             for _ in 0..<min(concurrency, order.count) {
                 guard let item = pending.next() else { break }
-                group.addTask { await update(item.0, await LatencyProbe.viaProxy(port: item.1)) }
+                group.addTask {
+                    let ms = await LatencyProbe.viaProxy(port: item.1)
+                    await update(item.0, ms)
+                }
             }
             while await group.next() != nil {
                 guard let item = pending.next() else { continue }
-                group.addTask { await update(item.0, await LatencyProbe.viaProxy(port: item.1)) }
+                group.addTask {
+                    let ms = await LatencyProbe.viaProxy(port: item.1)
+                    await update(item.0, ms)
+                }
             }
         }
         _ = try? await XrayEngine.call("stopXray")

@@ -127,9 +127,12 @@ enum LatencyProbe {
         await withTaskGroup(of: (String, Int?).self) { group -> [String: Int] in
             for t in targets {
                 group.addTask {
-                    let ms = t.udp
-                        ? await quic(host: t.host, port: t.port, sni: t.sni, timeout: timeout)
-                        : await tcp(host: t.host, port: t.port, timeout: timeout)
+                    let ms: Int?
+                    if t.udp {
+                        ms = await quic(host: t.host, port: t.port, sni: t.sni, timeout: timeout)
+                    } else {
+                        ms = await tcp(host: t.host, port: t.port, timeout: timeout)
+                    }
                     return (t.id, ms)
                 }
             }

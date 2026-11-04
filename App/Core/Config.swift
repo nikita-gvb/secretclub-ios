@@ -8,7 +8,7 @@ enum Config {
     }
     static var botURL: URL { URL(string: "https://t.me/\(botUsername)")! }
     /// Открыть нужный экран бота: buy, traffic, devices, extra…
-    static func botURL(start: String) -> URL { URL(string: "https://t.me/\(botUsername)?start=\(start)")! }
+    static func botLink(start: String) -> URL { URL(string: "https://t.me/\(botUsername)?start=\(start)")! }
     /// Бэкенд аккаунта (мини-апп). Для отладки можно переопределить ключом apiBase.
     static var apiBase: String {
         let saved = UserDefaults.standard.string(forKey: "apiBase") ?? ""

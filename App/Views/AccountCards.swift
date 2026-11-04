@@ -76,10 +76,10 @@ struct NoSubscriptionCard: View {
                 }
                 .buttonStyle(.scPrimary)
                 .disabled(app.busyAction != nil)
-                Button("Тарифы в боте") { openURL(Config.botURL(start: "buy")) }
+                Button("Тарифы в боте") { openURL(Config.botLink(start: "buy")) }
                     .buttonStyle(.scSecondary)
             } else {
-                Button("Оформить в боте") { openURL(Config.botURL(start: "buy")) }
+                Button("Оформить в боте") { openURL(Config.botLink(start: "buy")) }
                     .buttonStyle(.scPrimary)
             }
         }

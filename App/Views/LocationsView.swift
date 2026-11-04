@@ -57,7 +57,7 @@ struct LocationsView: View {
         let group = RouteGroup.reserve
         if let reserve = app.reserve {
             SCSection(header: group.title, footer: group.subtitle) {
-                Button { openURL(Config.botURL(start: "traffic")) } label: {
+                Button { openURL(Config.botLink(start: "traffic")) } label: {
                     SCRow(title: reserve.status.isUsable ? "Серверы не загрузились" : reserve.status.title,
                           subtitle: reserve.status.isUsable ? app.reserveError : "Докупите трафик в боте", chevron: true) {
                         CellIcon(systemName: group.icon, color: Theme.orange)

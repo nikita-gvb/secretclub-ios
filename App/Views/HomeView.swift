@@ -9,32 +9,33 @@ struct HomeView: View {
                 NetworkChip(mode: app.networkMode)
             }
             ConnectionHero()
-            if let error = app.vpn.lastError { errorCard(error) }
+            if let error = app.vpn.lastError {
+                NoticeCard(text: error, icon: "exclamationmark.triangle.fill", color: Theme.orange)
+            } else if app.routes.isEmpty, let error = app.refreshError {
+                NoticeCard(text: error, icon: "exclamationmark.triangle.fill", color: Theme.orange)
+            }
+            if let announce = app.meta?.announce {
+                NoticeCard(text: announce, icon: "megaphone.fill", color: Theme.tint)
+            }
             connectionSection
             subscriptionSection
-            if !app.isDemo {
-                Text("Тестовая сборка \(Config.version). Ядро Xray ещё не подключено — кнопка поднимает пробный туннель.")
-                    .font(.scFoot)
-                    .foregroundStyle(Theme.label3)
-                    .multilineTextAlignment(.center)
-                    .frame(maxWidth: .infinity)
-                    .padding(.top, 24)
-                    .padding(.horizontal, 12)
-            }
         }
+        .refreshable { await app.refreshSubscription() }
     }
 
     private var connectionSection: some View {
         SCSection(header: "Подключение") {
             Button { app.selectedTab = .locations } label: {
                 if let route = app.activeRoute {
-                    SCRow(title: route.country, subtitle: routeLine(route), chevron: true) {
-                        Flag(code: route.countryCode)
+                    SCRow(title: route.title, subtitle: routeLine(route), chevron: true) {
+                        Flag(emoji: route.emoji)
                     } trailing: {
                         PingLabel(ms: route.ping)
                     }
                 } else {
-                    SCRow(title: "Локация", value: "—", chevron: true) { CellIcon(systemName: "globe") }
+                    SCRow(title: "Локация", value: app.routes.isEmpty ? "нет серверов" : "Авто", chevron: true) {
+                        CellIcon(systemName: "globe")
+                    }
                 }
             }
             .buttonStyle(RowButtonStyle())
@@ -42,35 +43,49 @@ struct HomeView: View {
     }
 
     private func routeLine(_ route: Route) -> String {
-        app.autoMode ? "Авто · \(route.group.title)" : "\(route.group.title) · \(route.transport.title)"
+        app.autoMode ? "Авто · \(route.group.title)" : "\(route.group.title) · \(route.transportTitle)"
     }
 
     private var subscriptionSection: some View {
         let sub = app.subscription
+        let value: String
+        if !sub.isActive {
+            value = "Продлить"
+        } else if let days = sub.daysLeft {
+            value = "\(days) \(Format.plural(days, "день", "дня", "дней"))"
+        } else {
+            value = "Бессрочно"
+        }
         return SCSection(header: "Подписка") {
             Button { app.selectedTab = .subscription } label: {
-                SCRow(title: sub.isActive ? "Активна" : "Закончилась",
-                      value: sub.isActive ? "\(sub.daysLeft) \(Format.plural(sub.daysLeft, "день", "дня", "дней"))" : "Продлить",
-                      chevron: true) {
+                SCRow(title: sub.isActive ? "Активна" : "Закончилась", subtitle: sub.plan, value: value, chevron: true) {
                     CellIcon(systemName: "creditcard")
                 }
             }
             .buttonStyle(RowButtonStyle())
         }
     }
+}
 
-    private func errorCard(_ text: String) -> some View {
+struct NoticeCard: View {
+    let text: String
+    let icon: String
+    let color: Color
+
+    var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(Theme.orange)
+            Image(systemName: icon)
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(color)
             Text(text).font(.scSub).foregroundStyle(Theme.label)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: Theme.rCell, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: Theme.rCell, style: .continuous).strokeBorder(Theme.orange.opacity(0.28), lineWidth: 0.5))
+        .background(color.opacity(0.12), in: RoundedRectangle(cornerRadius: Theme.rCell, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: Theme.rCell, style: .continuous).strokeBorder(color.opacity(0.28), lineWidth: 0.5))
         .padding(.top, 12)
     }
 }
@@ -81,12 +96,12 @@ struct ConnectionHero: View {
 
     private var state: VPNController.State { app.vpn.state }
     private var isOn: Bool { state == .connected }
-    private var isBusy: Bool { state == .connecting || state == .disconnecting }
+    private var isBusy: Bool { app.vpn.isBusy }
 
     private var pill: (String, Color) {
         switch state {
         case .connected: return ("Защищено", Theme.green)
-        case .connecting: return ("Подключаемся", Theme.orange)
+        case .connecting, .preparing: return ("Подключаемся", Theme.orange)
         case .disconnecting: return ("Отключаемся", Theme.orange)
         case .disconnected: return ("Выключен", Theme.gray)
         case .invalid: return ("Нужна настройка", Theme.red)
@@ -134,10 +149,11 @@ struct ConnectionHero: View {
             } label: {
                 HStack(spacing: 8) {
                     if isBusy { ProgressView().tint(isOn ? Theme.label : Theme.onTint) }
-                    Text(isOn || state == .connecting ? "Отключить" : "Подключить")
+                    Text(isOn || state == .connecting ? "Отключить" : (state == .preparing ? "Подключаемся" : "Подключить"))
                 }
             }
             .buttonStyle(.sc(isOn || state == .connecting ? .secondary : .primary))
+            .disabled(state == .preparing || state == .disconnecting)
             .sensoryFeedback(.impact(weight: .medium), trigger: state)
         }
         .heroCard()
@@ -145,9 +161,10 @@ struct ConnectionHero: View {
     }
 
     private var subline: String {
-        guard let route = app.activeRoute else { return "Выберите локацию" }
-        if isOn { return "\(route.flag) \(route.country) · \(route.transport.title)" }
-        return "\(route.flag) \(route.country) · \(app.autoMode ? "авто" : route.transport.title)"
+        if let phase = app.phase, state == .preparing { return phase }
+        guard let route = app.activeRoute else { return app.routes.isEmpty ? "Серверы не загружены" : "Выберите локацию" }
+        if isOn || state == .connecting { return "\(route.emoji) \(route.title) · \(route.shortDetail)" }
+        return "\(route.emoji) \(route.title) · \(app.autoMode ? "авто" : route.shortDetail)"
     }
 
     @ViewBuilder private var badge: some View {

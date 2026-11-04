@@ -35,33 +35,49 @@ enum RouteGroup: String, CaseIterable, Identifiable, Codable {
 }
 
 enum TransportKind: String, Codable {
-    case reality, xhttp, hysteria2, cdn
-    var title: String {
-        switch self {
-        case .reality: return "Reality"
-        case .xhttp: return "XHTTP"
-        case .hysteria2: return "Hysteria2"
-        case .cdn: return "CDN"
-        }
-    }
+    case reality, xhttp, hysteria2, cdn, other
 }
 
-struct Route: Identifiable, Hashable, Codable {
+struct Route: Identifiable, Hashable {
     let id: String
-    let country: String
-    let countryCode: String
+    let emoji: String
+    let title: String
+    var detail: String
     let group: RouteGroup
     let transport: TransportKind
-    var ping: Int?
+    let transportTitle: String
+    let remarks: String
+    var isAutoBalancer: Bool = false
+    var ping: Int? = nil
+    var unavailable: Bool = false
 
-    var flag: String { countryCode.flagEmoji }
-
-    var detail: String {
+    var flag: String { emoji }
+    /// Подпись для карточки подключения: «Hysteria2», «через CDN» и т. п.
+    var shortDetail: String {
         switch group {
-        case .regular: return "\(transport.title) · напрямую"
-        case .bridge: return "через Россию · \(transport.title)"
-        case .bypass: return "через CDN · белые списки"
+        case .regular: return transportTitle
+        case .bridge: return "мост · \(transportTitle)"
+        case .bypass: return "через CDN"
         }
+    }
+
+    static func demo(_ id: String, _ code: String, _ country: String, _ group: RouteGroup, _ transport: TransportKind, _ ping: Int) -> Route {
+        let tt: String
+        switch transport {
+        case .reality: tt = "Reality"
+        case .xhttp: tt = "XHTTP"
+        case .hysteria2: tt = "Hysteria2"
+        case .cdn: tt = "XHTTP"
+        case .other: tt = "TLS"
+        }
+        let detail: String
+        switch group {
+        case .regular: detail = "\(tt) · напрямую"
+        case .bridge: detail = "через Россию · \(tt)"
+        case .bypass: detail = "через CDN · белые списки"
+        }
+        return Route(id: id, emoji: code.flagEmoji, title: country, detail: detail, group: group,
+                     transport: transport, transportTitle: tt, remarks: country, ping: ping)
     }
 }
 
@@ -135,20 +151,37 @@ struct Device: Identifiable, Hashable {
 
 struct SubscriptionInfo: Hashable {
     var plan: String
-    var startedAt: Date
-    var expiresAt: Date
+    var expiresAt: Date?
     var usedBytes: Int64
     var limitBytes: Int64?
     var devices: [Device]
-    var deviceLimit: Int
+    var deviceLimit: Int?
 
-    var isActive: Bool { expiresAt > Date() }
-    var daysLeft: Int { max(0, Calendar.current.dateComponents([.day], from: Date(), to: expiresAt).day ?? 0) }
-    var progress: Double {
-        let total = expiresAt.timeIntervalSince(startedAt)
-        guard total > 0 else { return 0 }
-        return min(1, max(0, expiresAt.timeIntervalSinceNow / total))
+    static let empty = SubscriptionInfo(plan: "SecretClub", expiresAt: nil, usedBytes: 0, limitBytes: nil, devices: [], deviceLimit: nil)
+
+    var isActive: Bool { expiresAt.map { $0 > Date() } ?? true }
+    var daysLeft: Int? {
+        expiresAt.map { max(0, Calendar.current.dateComponents([.day], from: Date(), to: $0).day ?? 0) }
     }
+    var progress: Double {
+        guard let d = daysLeft else { return 1 }
+        return min(1, Double(d) / 30)
+    }
+    var remainingText: String {
+        guard let d = daysLeft else { return "бессрочно" }
+        return "ещё \(d) \(Format.plural(d, "день", "дня", "дней"))"
+    }
+}
+
+struct SubscriptionMeta: Codable, Hashable {
+    var title: String?
+    var announce: String?
+    var supportURL: String?
+    var upload: Int64 = 0
+    var download: Int64 = 0
+    var total: Int64 = 0
+    var expire: Date?
+    var updatedAt = Date()
 }
 
 extension String {
@@ -158,5 +191,16 @@ extension String {
             if let u = UnicodeScalar(127397 + v.value) { s.unicodeScalars.append(u) }
         }
         return s
+    }
+}
+
+extension SubscriptionInfo {
+    init(meta: SubscriptionMeta) {
+        self.init(plan: meta.title ?? "SecretClub",
+                  expiresAt: meta.expire,
+                  usedBytes: meta.upload + meta.download,
+                  limitBytes: meta.total > 0 ? meta.total : nil,
+                  devices: [Device(id: "this", name: DeviceInfo.displayName, kind: .phone, lastSeen: Date(), isCurrent: true)],
+                  deviceLimit: nil)
     }
 }

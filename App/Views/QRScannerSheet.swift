@@ -5,6 +5,8 @@ struct QRScannerSheet: View {
     @Environment(AppModel.self) private var app
     @Environment(\.dismiss) private var dismiss
     @State private var error: String?
+    @State private var busy = false
+    @State private var lastValue: String?
 
     private var scannerAvailable: Bool {
         DataScannerViewController.isSupported && DataScannerViewController.isAvailable
@@ -15,10 +17,21 @@ struct QRScannerSheet: View {
             ZStack {
                 if scannerAvailable {
                     QRScannerView { value in
-                        if app.login(with: value) {
-                            dismiss()
-                        } else {
+                        guard !busy, value != lastValue else { return }
+                        lastValue = value
+                        guard AppModel.extractSubscriptionURL(from: value.trimmingCharacters(in: .whitespacesAndNewlines)) != nil else {
                             error = "В QR-коде нет ссылки на подписку"
+                            return
+                        }
+                        busy = true
+                        error = "Проверяем подписку…"
+                        Task {
+                            if let problem = await app.login(with: value) {
+                                error = problem
+                                busy = false
+                            } else {
+                                dismiss()
+                            }
                         }
                     }
                     .ignoresSafeArea()

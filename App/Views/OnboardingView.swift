@@ -95,6 +95,7 @@ struct PasteLinkSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var text = ""
     @State private var error: String?
+    @State private var busy = false
     @FocusState private var focused: Bool
 
     var body: some View {
@@ -123,15 +124,25 @@ struct PasteLinkSheet: View {
                         .padding(.horizontal, 4)
                 }
                 Spacer()
-                Button("Войти") {
-                    if app.login(with: text) {
-                        dismiss()
-                    } else {
-                        error = "Это не похоже на ссылку подписки. Она начинается с https://"
+                Button {
+                    busy = true
+                    error = nil
+                    Task {
+                        if let problem = await app.login(with: text) {
+                            error = problem
+                            busy = false
+                        } else {
+                            dismiss()
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 8) {
+                        if busy { ProgressView().tint(Theme.onTint) }
+                        Text(busy ? "Проверяем подписку…" : "Войти")
                     }
                 }
                 .buttonStyle(.scPrimary)
-                .disabled(text.trimmingCharacters(in: .whitespaces).isEmpty)
+                .disabled(busy || text.trimmingCharacters(in: .whitespaces).isEmpty)
             }
             .padding(16)
             .background(Theme.background.ignoresSafeArea())

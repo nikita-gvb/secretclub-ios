@@ -53,3 +53,36 @@ enum NetworkProbe {
         return .offline
     }
 }
+
+struct TraceResult {
+    let ip: String
+    let location: String?
+    let ms: Int
+}
+
+extension NetworkProbe {
+    /// Через какой IP и страну сейчас выходит трафик (Cloudflare trace).
+    static func trace() async -> TraceResult? {
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.timeoutIntervalForRequest = 8
+        cfg.timeoutIntervalForResource = 10
+        cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
+        let session = URLSession(configuration: cfg)
+        defer { session.finishTasksAndInvalidate() }
+        let start = Date()
+        guard let url = URL(string: "https://www.cloudflare.com/cdn-cgi/trace"),
+              let (data, _) = try? await session.data(from: url),
+              let text = String(data: data, encoding: .utf8) else { return nil }
+        var fields: [String: String] = [:]
+        for line in text.split(separator: "\n") {
+            let kv = line.split(separator: "=", maxSplits: 1).map(String.init)
+            if kv.count == 2 { fields[kv[0]] = kv[1] }
+        }
+        guard let ip = fields["ip"] else { return nil }
+        let loc = fields["loc"].flatMap { code -> String? in
+            guard code.count == 2 else { return nil }
+            return "\(code.flagEmoji) \(Locale(identifier: "ru_RU").localizedString(forRegionCode: code) ?? code)"
+        }
+        return TraceResult(ip: ip, location: loc, ms: Int(Date().timeIntervalSince(start) * 1000))
+    }
+}

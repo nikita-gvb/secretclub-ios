@@ -5,3 +5,4 @@ DerivedData/
 shots/
 Support/*-Info.plist
 .DS_Store
+Vendor/

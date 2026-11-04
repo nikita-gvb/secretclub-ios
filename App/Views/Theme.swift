@@ -486,10 +486,18 @@ struct BrandMark: View {
 }
 
 struct Flag: View {
-    let code: String
+    let emoji: String
     var size: CGFloat = 30
+    init(code: String, size: CGFloat = 30) {
+        self.emoji = code.flagEmoji
+        self.size = size
+    }
+    init(emoji: String, size: CGFloat = 30) {
+        self.emoji = emoji
+        self.size = size
+    }
     var body: some View {
-        Text(code.flagEmoji)
+        Text(emoji)
             .font(.system(size: size * 0.74))
             .frame(width: size, height: size)
             .background(Theme.fill3, in: Circle())

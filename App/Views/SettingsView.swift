@@ -19,7 +19,7 @@ struct SettingsView: View {
             PageScroll {
                 PageHeader(title: "Настройки")
 
-                SCSection(header: "Подключение", footer: "Автоподключение включит VPN в новой сети. «Без VPN — без сети» не выпустит трафик мимо туннеля.") {
+                SCSection(header: "Подключение", footer: "Автоподключение само включит VPN, когда появится сеть. «Без VPN — без сети» не выпустит трафик мимо туннеля — применится при следующем подключении.") {
                     Menu {
                         Picker("Протокол", selection: $transport) {
                             ForEach(TransportPreference.allCases) { Text($0.title).tag($0) }
@@ -49,7 +49,7 @@ struct SettingsView: View {
                     .buttonStyle(RowButtonStyle())
                 }
 
-                SCSection(header: "Батарея", footer: "Меньше фоновых проверок и переподключений.") {
+                SCSection(header: "Батарея", footer: "Реже обновляет подписку и не проверяет пинг при каждом запуске.") {
                     ToggleRow(title: "Экономия заряда", icon: "leaf", isOn: $energySaver)
                 }
 
@@ -74,6 +74,8 @@ struct SettingsView: View {
                 }
             }
             .toolbar(.hidden, for: .navigationBar)
+            .onChange(of: ruDirect) { app.settingsChanged() }
+            .onChange(of: autoConnect) { _, on in app.autoConnectChanged(on) }
             .navigationDestination(for: SettingsRoute.self) { route in
                 switch route {
                 case .diagnostics: DiagnosticsView()
@@ -116,6 +118,7 @@ enum ExceptionTarget: String, CaseIterable, Identifiable {
 }
 
 struct ExceptionsView: View {
+    @Environment(AppModel.self) private var app
     @AppStorage(SettingsKey.vpnDomains) private var vpnRaw = ""
     @AppStorage(SettingsKey.directDomains) private var directRaw = ""
     @State private var newDomain = ""
@@ -159,6 +162,8 @@ struct ExceptionsView: View {
         .background(AppBackground(glow: 0))
         .navigationTitle("Исключения")
         .navigationBarTitleDisplayMode(.inline)
+        .onChange(of: vpnRaw) { app.settingsChanged() }
+        .onChange(of: directRaw) { app.settingsChanged() }
     }
 
     private func section(_ t: ExceptionTarget, header: String) -> some View {

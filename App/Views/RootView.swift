@@ -2,6 +2,7 @@ import SwiftUI
 
 struct RootView: View {
     @Environment(AppModel.self) private var app
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         Group {
@@ -14,9 +15,13 @@ struct RootView: View {
             }
         }
         .animation(.easeInOut(duration: 0.3), value: app.isLoggedIn)
-        .task {
-            await app.vpn.load()
-            await app.refreshNetwork()
+        .task { await app.start() }
+        .onChange(of: scenePhase) { _, phase in
+            switch phase {
+            case .active: Task { await app.becameActive() }
+            case .background: app.vpn.setForeground(false)
+            default: break
+            }
         }
     }
 }

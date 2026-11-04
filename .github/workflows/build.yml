@@ -22,6 +22,22 @@ jobs:
           brew install xcodegen
           xcodegen --version
 
+      - name: Cache LibXray
+        id: libxray-cache
+        uses: actions/cache@v4
+        with:
+          path: Vendor/LibXray.xcframework
+          key: libxray-apple-cgo-v26.10.31
+
+      - name: Download LibXray
+        if: steps.libxray-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p Vendor /tmp/libxray
+          curl -fsSL -o /tmp/libxray.zip https://github.com/XTLS/libXray/releases/download/v26.10.31/libxray-apple-cgo.zip
+          unzip -q /tmp/libxray.zip -d /tmp/libxray
+          mv /tmp/libxray/libxray-apple-cgo/LibXray.xcframework Vendor/
+          ls Vendor/LibXray.xcframework
+
       - name: Generate project
         run: xcodegen generate
 
@@ -61,6 +77,8 @@ jobs:
             exit 1
           fi
           APP=build/dev/Build/Products/Release-iphoneos/SecretClub.app
+          xcrun strip -Sx "$APP/SecretClub" "$APP/PlugIns/PacketTunnel.appex/PacketTunnel" || true
+          ls -la "$APP" "$APP/PlugIns/PacketTunnel.appex"
           # ad-hoc подпись с entitlements, чтобы сервисы переподписи видели нужные права (Network Extension)
           codesign --force --sign - --entitlements Support/PacketTunnel.entitlements "$APP/PlugIns/PacketTunnel.appex"
           codesign --force --sign - --entitlements Support/SecretClub.entitlements "$APP"

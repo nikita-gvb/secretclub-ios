@@ -5,7 +5,13 @@ enum Config {
     static let botUsername = "secretclub_bot"
     static var botURL: URL { URL(string: "https://t.me/\(botUsername)")! }
     static var botLoginURL: URL { URL(string: "https://t.me/\(botUsername)?start=app")! }
-    static var supportURL: URL { URL(string: "https://t.me/\(botUsername)?start=support")! }
+    /// Поддержка: из заголовка support-url подписки, иначе — через бота.
+    static var supportURL: URL {
+        if let s = UserDefaults.standard.string(forKey: "supportURL"), let url = URL(string: s) { return url }
+        return URL(string: "https://t.me/aioap")!
+    }
+
+    static var shortVersion: String { Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0" }
 
     static var version: String {
         let info = Bundle.main.infoDictionary
@@ -16,7 +22,6 @@ enum Config {
 }
 
 enum SettingsKey {
-    static let theme = "theme"
     static let autoConnect = "autoConnect"
     static let killSwitch = "killSwitch"
     static let ruDirect = "ruDirect"
@@ -24,25 +29,9 @@ enum SettingsKey {
     static let transport = "preferredTransport"
     static let vpnDomains = "vpnDomains"
     static let directDomains = "directDomains"
-}
-
-enum AppTheme: String, CaseIterable, Identifiable {
-    case system, dark, light
-    var id: String { rawValue }
-    var title: String {
-        switch self {
-        case .system: return "Как в системе"
-        case .dark: return "Тёмная"
-        case .light: return "Светлая"
-        }
-    }
-    var colorScheme: ColorScheme? {
-        switch self {
-        case .system: return nil
-        case .dark: return .dark
-        case .light: return .light
-        }
-    }
+    static let autoMode = "autoMode"
+    static let selectedRoute = "selectedRoute"
+    static let connectedRoute = "connectedRoute"
 }
 
 enum TransportPreference: String, CaseIterable, Identifiable {

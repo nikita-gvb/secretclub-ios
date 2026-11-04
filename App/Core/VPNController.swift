@@ -2,11 +2,25 @@ import Foundation
 import NetworkExtension
 import Observation
 
+struct ConnectRequest {
+    let config: String
+    let routeID: String
+    let routeTitle: String
+    let onDemand: Bool
+    let killSwitch: Bool
+}
+
+struct VPNError: LocalizedError {
+    let message: String
+    init(_ message: String) { self.message = message }
+    var errorDescription: String? { message }
+}
+
 @MainActor
 @Observable
 final class VPNController {
     enum State: Equatable {
-        case disconnected, connecting, connected, disconnecting, invalid
+        case disconnected, preparing, connecting, connected, disconnecting, invalid
     }
 
     var state: State = .disconnected
@@ -14,14 +28,21 @@ final class VPNController {
     var lastError: String?
     var bytesIn: Int64 = 0
     var bytesOut: Int64 = 0
+    var report: TunnelReport?
 
     @ObservationIgnored private var manager: NETunnelProviderManager?
     @ObservationIgnored private var observer: NSObjectProtocol?
+    @ObservationIgnored private var statsTask: Task<Void, Never>?
+    @ObservationIgnored private var foreground = true
     @ObservationIgnored private(set) var isDemo = false
 
     static var tunnelBundleID: String {
         (Bundle.main.bundleIdentifier ?? "com.secretclub.app") + ".tunnel"
     }
+
+    /// Туннель поднят или поднимается.
+    var isActive: Bool { state == .connected || state == .connecting || state == .preparing }
+    var isBusy: Bool { state == .connecting || state == .disconnecting || state == .preparing }
 
     func enableDemo(connected: Bool) {
         isDemo = true
@@ -37,7 +58,10 @@ final class VPNController {
         guard !isDemo else { return }
         do {
             let managers = try await NETunnelProviderManager.loadAllFromPreferences()
-            if let m = managers.first {
+            let mine = managers.first {
+                ($0.protocolConfiguration as? NETunnelProviderProtocol)?.providerBundleIdentifier == Self.tunnelBundleID
+            } ?? managers.first
+            if let m = mine {
                 manager = m
                 observe(m)
                 update(m.connection.status)
@@ -47,11 +71,40 @@ final class VPNController {
         }
     }
 
-    private func prepareManager() async throws -> NETunnelProviderManager {
+    // MARK: - Подключение
+
+    /// Пока приложение выбирает сервер — показываем «подключаемся».
+    func beginPreparing() {
+        lastError = nil
+        if state == .disconnected || state == .invalid { state = .preparing }
+    }
+
+    func cancelPreparing(_ error: String?) {
+        if state == .preparing { state = .disconnected }
+        lastError = error
+    }
+
+    private func prepareManager(_ request: ConnectRequest?) async throws -> NETunnelProviderManager {
         let m = manager ?? NETunnelProviderManager()
-        let proto = NETunnelProviderProtocol()
+        let proto = (m.protocolConfiguration as? NETunnelProviderProtocol) ?? NETunnelProviderProtocol()
         proto.providerBundleIdentifier = Self.tunnelBundleID
-        proto.serverAddress = "SecretClub"
+        if let request {
+            proto.serverAddress = request.routeTitle
+            proto.providerConfiguration = [
+                TunnelOption.config: request.config,
+                TunnelOption.routeID: request.routeID,
+                TunnelOption.routeTitle: request.routeTitle,
+            ]
+            proto.includeAllNetworks = request.killSwitch
+            proto.excludeLocalNetworks = true
+            let rule = NEOnDemandRuleConnect()
+            rule.interfaceTypeMatch = .any
+            m.onDemandRules = [rule]
+            m.isOnDemandEnabled = request.onDemand
+        } else if proto.serverAddress?.isEmpty ?? true {
+            proto.serverAddress = "SecretClub"
+        }
+        proto.disconnectOnSleep = false
         m.protocolConfiguration = proto
         m.localizedDescription = "SecretClub"
         m.isEnabled = true
@@ -62,7 +115,7 @@ final class VPNController {
         return m
     }
 
-    func connect() async {
+    func connect(_ request: ConnectRequest) async throws {
         lastError = nil
         if isDemo {
             state = .connecting
@@ -72,72 +125,213 @@ final class VPNController {
             return
         }
         state = .connecting
+        let m: NETunnelProviderManager
         do {
-            let m = try await prepareManager()
-            try m.connection.startVPNTunnel()
+            m = try await prepareManager(request)
+            try m.connection.startVPNTunnel(options: [
+                TunnelOption.config: request.config as NSString,
+                TunnelOption.routeID: request.routeID as NSString,
+                TunnelOption.routeTitle: request.routeTitle as NSString,
+            ])
         } catch {
-            lastError = Self.describe(error)
             state = .disconnected
+            throw VPNError(Self.describe(error))
+        }
+        let status = await waitForOutcome(m, timeout: 40)
+        update(status)
+        guard status == .connected else {
+            let reason = await disconnectReason(m)
+            throw VPNError(reason ?? "Не удалось подключиться к «\(request.routeTitle)». Попробуйте другую локацию.")
         }
     }
 
-    func disconnect() {
+    /// Смена сервера без разрыва туннеля.
+    func reload(_ request: ConnectRequest) async -> Bool {
+        if isDemo { return true }
+        guard state == .connected else { return false }
+        let command = TunnelCommand(kind: .reload, config: request.config, routeID: request.routeID, routeTitle: request.routeTitle)
+        guard let reply = await send(command, attempts: 1, timeout: 25) else { return false }
+        report = reply
+        if let error = reply.error, !reply.running { lastError = "Сервер не запустился: \(error)" }
+        return reply.running && reply.error == nil
+    }
+
+    func disconnect() async {
         if isDemo {
             state = .disconnected
             connectedSince = nil
             return
         }
-        manager?.connection.stopVPNTunnel()
+        guard let m = manager else { state = .disconnected; return }
+        if m.isOnDemandEnabled {
+            m.isOnDemandEnabled = false
+            try? await m.saveToPreferences()
+        }
+        m.connection.stopVPNTunnel()
+        _ = await waitForOutcome(m, timeout: 8)
     }
 
-    /// Проверка, что подпись приложения позволяет запускать VPN.
-    func permissionTest() async -> [DiagnosticStep] {
+    /// Автоподключение (On Demand) можно переключить без переподключения.
+    func setOnDemand(_ enabled: Bool) async {
+        guard !isDemo, let m = manager, m.protocolConfiguration != nil else { return }
+        guard m.isOnDemandEnabled != enabled else { return }
+        if enabled, m.onDemandRules?.isEmpty ?? true {
+            let rule = NEOnDemandRuleConnect()
+            rule.interfaceTypeMatch = .any
+            m.onDemandRules = [rule]
+        }
+        m.isOnDemandEnabled = enabled
+        try? await m.saveToPreferences()
+    }
+
+    private func waitForOutcome(_ m: NETunnelProviderManager, timeout: Double) async -> NEVPNStatus {
+        let start = Date()
+        var moved = false
+        while Date().timeIntervalSince(start) < timeout {
+            let status = m.connection.status
+            switch status {
+            case .connected:
+                return status
+            case .connecting, .reasserting, .disconnecting:
+                moved = true
+            case .disconnected, .invalid:
+                if moved || Date().timeIntervalSince(start) > 3 { return status }
+            @unknown default:
+                break
+            }
+            try? await Task.sleep(for: .milliseconds(150))
+        }
+        return m.connection.status
+    }
+
+    private func disconnectReason(_ m: NETunnelProviderManager) async -> String? {
+        do {
+            try await m.connection.fetchLastDisconnectError()
+            return nil
+        } catch {
+            let ns = error as NSError
+            if let underlying = ns.userInfo[NSUnderlyingErrorKey] as? NSError {
+                return underlying.localizedDescription
+            }
+            return Self.describe(error)
+        }
+    }
+
+    // MARK: - Сообщения расширению
+
+    func send(_ command: TunnelCommand, attempts: Int = 3, timeout: Double = 4) async -> TunnelReport? {
+        guard let data = TunnelCoding.encode(command) else { return nil }
+        for attempt in 0..<attempts {
+            if let reply = await sendRaw(data, timeout: timeout), let report = TunnelCoding.decode(TunnelReport.self, reply) {
+                return report
+            }
+            if attempt < attempts - 1 { try? await Task.sleep(for: .milliseconds(400 * (attempt + 1))) }
+        }
+        return nil
+    }
+
+    private func sendRaw(_ data: Data, timeout: Double) async -> Data? {
+        guard let session = manager?.connection as? NETunnelProviderSession else { return nil }
+        return await withCheckedContinuation { (cont: CheckedContinuation<Data?, Never>) in
+            let once = ResumeOnce(cont)
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { once.resume(nil) }
+            do {
+                try session.sendProviderMessage(data) { reply in once.resume(reply) }
+            } catch {
+                once.resume(nil)
+            }
+        }
+    }
+
+    func setForeground(_ value: Bool) {
+        foreground = value
+        if value, state == .connected { startStats() } else if !value { stopStats() }
+    }
+
+    private func startStats() {
+        guard !isDemo, statsTask == nil else { return }
+        statsTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                if let r = await self.send(TunnelCommand(kind: .status), attempts: 1, timeout: 2) {
+                    self.report = r
+                    self.bytesIn = r.downlink
+                    self.bytesOut = r.uplink
+                }
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
+    }
+
+    private func stopStats() {
+        statsTask?.cancel()
+        statsTask = nil
+    }
+
+    // MARK: - Диагностика
+
+    /// Если VPN включён — проверяет ядро и выход в интернет через туннель.
+    /// Если выключен — поднимает пробный туннель без перехвата трафика.
+    func selfTest() async -> [DiagnosticStep] {
         if isDemo { return DemoData.permissionSteps }
         var steps: [DiagnosticStep] = []
+
+        if state == .connected {
+            steps.append(DiagnosticStep(ok: true, text: "VPN подключён"))
+            if let r = await send(TunnelCommand(kind: .status), attempts: 5, timeout: 3) {
+                report = r
+                if r.running {
+                    steps.append(DiagnosticStep(ok: true, text: "Ядро Xray \(r.coreVersion) работает"))
+                } else {
+                    steps.append(DiagnosticStep(ok: false, text: "Ядро не запущено: \(r.error ?? "причина неизвестна")"))
+                }
+                if let mb = r.memoryMB {
+                    steps.append(DiagnosticStep(ok: mb < 45, text: "Память расширения: \(Int(mb.rounded())) МБ из 50"))
+                }
+            } else {
+                steps.append(DiagnosticStep(ok: false, text: "Расширение не ответило на запрос статуса"))
+            }
+            if let trace = await NetworkProbe.trace() {
+                steps.append(DiagnosticStep(ok: true, text: "Интернет через VPN: IP \(trace.ip)\(trace.location.map { ", \($0)" } ?? ""), \(trace.ms) мс"))
+            } else {
+                steps.append(DiagnosticStep(ok: false, text: "Через туннель нет доступа в интернет"))
+            }
+            return steps
+        }
+
         let m: NETunnelProviderManager
         do {
-            m = try await prepareManager()
+            m = try await prepareManager(nil)
             steps.append(DiagnosticStep(ok: true, text: "VPN-профиль создан"))
         } catch {
             steps.append(DiagnosticStep(ok: false, text: "Профиль не создан: \(Self.describe(error))"))
             return steps
         }
-
-        let wasConnected = m.connection.status == .connected
-        if !wasConnected {
-            do {
-                try m.connection.startVPNTunnel()
-            } catch {
-                steps.append(DiagnosticStep(ok: false, text: "Туннель не запустился: \(Self.describe(error))"))
-                return steps
-            }
-            for _ in 0..<40 {
-                if m.connection.status == .connected { break }
-                try? await Task.sleep(for: .milliseconds(250))
-            }
+        do {
+            try m.connection.startVPNTunnel(options: [TunnelOption.probe: NSNumber(value: true)])
+        } catch {
+            steps.append(DiagnosticStep(ok: false, text: "Туннель не запустился: \(Self.describe(error))"))
+            return steps
         }
-        guard m.connection.status == .connected else {
-            steps.append(DiagnosticStep(ok: false, text: "Туннель не поднялся (статус \(m.connection.status.rawValue)). Скорее всего, сертификат не поддерживает Network Extension."))
+        let status = await waitForOutcome(m, timeout: 15)
+        guard status == .connected else {
+            let reason = await disconnectReason(m)
+            steps.append(DiagnosticStep(ok: false, text: "Туннель не поднялся: \(reason ?? "статус \(status.rawValue)"). Возможно, сертификат без Network Extension."))
             return steps
         }
         steps.append(DiagnosticStep(ok: true, text: "Пробный туннель запущен"))
-
-        if let session = m.connection as? NETunnelProviderSession {
-            let reply: String? = await withCheckedContinuation { cont in
-                do {
-                    try session.sendProviderMessage(Data("ping".utf8)) { data in
-                        cont.resume(returning: data.flatMap { String(data: $0, encoding: .utf8) })
-                    }
-                } catch {
-                    cont.resume(returning: nil)
-                }
-            }
-            let ok = reply == "pong"
-            steps.append(DiagnosticStep(ok: ok, text: ok ? "Расширение отвечает" : "Расширение не ответило"))
+        try? await Task.sleep(for: .milliseconds(500))
+        if let r = await send(TunnelCommand(kind: .status), attempts: 5, timeout: 3) {
+            steps.append(DiagnosticStep(ok: true, text: "Расширение отвечает, ядро Xray \(r.coreVersion)"))
+        } else {
+            steps.append(DiagnosticStep(ok: false, text: "Расширение не ответило"))
         }
-        if !wasConnected { m.connection.stopVPNTunnel() }
+        m.connection.stopVPNTunnel()
+        _ = await waitForOutcome(m, timeout: 5)
         return steps
     }
+
+    // MARK: - Статус
 
     private func observe(_ m: NETunnelProviderManager) {
         if let observer { NotificationCenter.default.removeObserver(observer) }
@@ -150,10 +344,12 @@ final class VPNController {
     }
 
     private func update(_ status: NEVPNStatus) {
+        let probe = report?.probe == true
         switch status {
         case .connected:
             state = .connected
             connectedSince = manager?.connection.connectedDate ?? Date()
+            if foreground && !probe { startStats() }
         case .connecting, .reasserting:
             state = .connecting
         case .disconnecting:
@@ -161,9 +357,14 @@ final class VPNController {
         case .invalid:
             state = .invalid
             connectedSince = nil
+            stopStats()
         default:
-            state = .disconnected
+            if state != .preparing { state = .disconnected }
             connectedSince = nil
+            bytesIn = 0
+            bytesOut = 0
+            report = nil
+            stopStats()
         }
     }
 
@@ -189,5 +390,19 @@ final class VPNController {
             return "ошибка конфигурации VPN (\(ns.code)): \(ns.localizedDescription)"
         }
         return ns.localizedDescription
+    }
+}
+
+/// Продолжение, которое можно безопасно «возобновить» несколько раз (срабатывает первое).
+final class ResumeOnce<T>: @unchecked Sendable {
+    private var continuation: CheckedContinuation<T, Never>?
+    private let lock = NSLock()
+    init(_ continuation: CheckedContinuation<T, Never>) { self.continuation = continuation }
+    func resume(_ value: T) {
+        lock.lock()
+        let c = continuation
+        continuation = nil
+        lock.unlock()
+        c?.resume(returning: value)
     }
 }

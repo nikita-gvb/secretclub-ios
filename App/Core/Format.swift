@@ -39,3 +39,15 @@ enum Format {
         return "\(days) \(plural(days, "день", "дня", "дней")) назад"
     }
 }
+
+extension Format {
+    /// «только что», «5 мин назад», «2 ч назад», «3 дн назад».
+    static func ago(_ d: Date) -> String {
+        let minutes = Int(Date().timeIntervalSince(d) / 60)
+        if minutes < 1 { return "только что" }
+        if minutes < 60 { return "\(minutes) мин назад" }
+        let hours = minutes / 60
+        if hours < 24 { return "\(hours) ч назад" }
+        return "\(hours / 24) дн назад"
+    }
+}

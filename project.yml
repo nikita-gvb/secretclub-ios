@@ -7,19 +7,24 @@ options:
   createIntermediateGroups: true
 settings:
   base:
-    MARKETING_VERSION: "0.2.0"
-    CURRENT_PROJECT_VERSION: "2"
+    MARKETING_VERSION: "0.3.0"
+    CURRENT_PROJECT_VERSION: "3"
     SWIFT_VERSION: "5.0"
     IPHONEOS_DEPLOYMENT_TARGET: "17.0"
     TARGETED_DEVICE_FAMILY: "1"
     CODE_SIGN_STYLE: Manual
     DEVELOPMENT_TEAM: ""
+    OTHER_LDFLAGS: "$(inherited) -lresolv -framework Security -framework CoreFoundation"
+    DEAD_CODE_STRIPPING: YES
 targets:
   SecretClub:
     type: application
     platform: iOS
     sources:
       - path: App
+      - path: Shared
+      - path: Geo
+        buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.secretclub.app
@@ -47,11 +52,19 @@ targets:
             CFBundleURLSchemes: [secretclub]
     dependencies:
       - target: PacketTunnel
+      - framework: Vendor/LibXray.xcframework
+        embed: false
   PacketTunnel:
     type: app-extension
     platform: iOS
     sources:
       - path: PacketTunnel
+      - path: Shared
+      - path: Geo
+        buildPhase: resources
+    dependencies:
+      - framework: Vendor/LibXray.xcframework
+        embed: false
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.secretclub.app.tunnel
@@ -61,6 +74,9 @@ targets:
       path: Support/PacketTunnel-Info.plist
       properties:
         CFBundleDisplayName: SecretClub Tunnel
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+          NSAllowsLocalNetworking: true
         NSExtension:
           NSExtensionPointIdentifier: com.apple.networkextension.packet-tunnel
           NSExtensionPrincipalClass: "$(PRODUCT_MODULE_NAME).PacketTunnelProvider"

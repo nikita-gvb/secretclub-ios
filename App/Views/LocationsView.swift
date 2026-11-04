@@ -5,12 +5,45 @@ struct LocationsView: View {
 
     var body: some View {
         PageScroll {
-            PageHeader(title: "Локации")
+            PageHeader(title: "Локации") {
+                Group {
+                    if app.isPinging {
+                        ProgressView().tint(Theme.tint).frame(width: 40, height: 40)
+                    } else {
+                        RoundIconButton(systemName: "speedometer", size: 40) {
+                            Task { await app.pingAll() }
+                        }
+                        .disabled(!app.canPing)
+                        .opacity(app.canPing ? 1 : 0.4)
+                        .accessibilityLabel("Проверить пинг")
+                    }
+                }
+                .alignmentGuide(.lastTextBaseline) { d in d[.bottom] - 8 }
+            }
             autoOption
+            if app.routes.isEmpty {
+                emptyState
+            }
             ForEach(RouteGroup.allCases) { group in
-                section(group)
+                if app.routes.contains(where: { $0.group == group }) {
+                    section(group)
+                }
+            }
+            if app.vpn.isActive && !app.isDemo {
+                Text("Пока VPN включён, пинг не обновляется — он измерялся бы через сам туннель.")
+                    .font(.scFoot)
+                    .foregroundStyle(Theme.label3)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 18)
+                    .padding(.horizontal, 12)
             }
         }
+        .refreshable {
+            await app.refreshSubscription()
+            await app.pingAll()
+        }
+        .task { await app.pingIfStale() }
     }
 
     private var autoOption: some View {
@@ -21,7 +54,7 @@ struct LocationsView: View {
                 CellIcon(systemName: "sparkles", color: Theme.tint, size: 34)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Авто").font(.scHeadline).foregroundStyle(Theme.label)
-                    Text("Сам выберет лучший маршрут и переключится, если сеть изменится")
+                    Text("Проверит сеть и подключит к самому быстрому рабочему серверу")
                         .font(.scFoot)
                         .foregroundStyle(Theme.label2)
                         .multilineTextAlignment(.leading)
@@ -40,12 +73,24 @@ struct LocationsView: View {
         .animation(.easeOut(duration: 0.2), value: app.autoMode)
     }
 
+    private var emptyState: some View {
+        SCSection(footer: app.refreshError ?? "Потяните вниз, чтобы обновить подписку.") {
+            SCRow(title: app.isRefreshing ? "Загружаем серверы…" : "Серверы не загружены") {
+                CellIcon(systemName: "tray")
+            } trailing: {
+                if app.isRefreshing { ProgressView() }
+            }
+        }
+    }
+
     private func section(_ group: RouteGroup) -> some View {
         let items = app.routes.filter { $0.group == group }
         return SCSection(header: group.title, footer: group.subtitle) {
             ForEach(Array(items.enumerated()), id: \.element.id) { index, route in
                 if index > 0 { SCDivider(inset: 58) }
-                RouteRow(route: route, selected: !app.autoMode && app.selectedRouteID == route.id) {
+                RouteRow(route: route,
+                         selected: !app.autoMode && app.selectedRouteID == route.id,
+                         connected: app.vpn.state == .connected && app.connectedRouteID == route.id) {
                     app.select(route)
                 }
             }
@@ -56,18 +101,23 @@ struct LocationsView: View {
 struct RouteRow: View {
     let route: Route
     let selected: Bool
+    var connected = false
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            SCRow(title: route.country, subtitle: route.detail) {
-                Flag(code: route.countryCode)
+            SCRow(title: route.title, subtitle: route.detail) {
+                Flag(emoji: route.emoji)
             } trailing: {
-                PingLabel(ms: route.ping)
-                Image(systemName: "checkmark")
+                if route.unavailable {
+                    Text("нет ответа").font(.scSub).foregroundStyle(Theme.label3)
+                } else {
+                    PingLabel(ms: route.ping)
+                }
+                Image(systemName: connected ? "checkmark.shield.fill" : "checkmark")
                     .font(.system(size: 15, weight: .bold))
-                    .foregroundStyle(Theme.tint)
-                    .opacity(selected ? 1 : 0)
+                    .foregroundStyle(connected ? Theme.green : Theme.tint)
+                    .opacity(selected || connected ? 1 : 0)
                     .frame(width: 18)
             }
         }

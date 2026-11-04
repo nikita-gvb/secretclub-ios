@@ -6,7 +6,6 @@ enum SettingsRoute: Hashable {
 
 struct SettingsView: View {
     @Environment(AppModel.self) private var app
-    @AppStorage(SettingsKey.theme) private var theme: AppTheme = .dark
     @AppStorage(SettingsKey.autoConnect) private var autoConnect = false
     @AppStorage(SettingsKey.killSwitch) private var killSwitch = false
     @AppStorage(SettingsKey.ruDirect) private var ruDirect = true
@@ -17,78 +16,64 @@ struct SettingsView: View {
 
     var body: some View {
         NavigationStack(path: $path) {
-            List {
-                Section {
-                    Picker(selection: $transport) {
-                        ForEach(TransportPreference.allCases) { Text($0.title).tag($0) }
-                    } label: {
-                        SettingsLabel("Протокол", icon: "point.3.connected.trianglepath.dotted", color: Theme.accent)
-                    }
-                    Toggle(isOn: $autoConnect) {
-                        SettingsLabel("Автоподключение", icon: "bolt.fill", color: .orange)
-                    }
-                    Toggle(isOn: $killSwitch) {
-                        SettingsLabel("Без VPN — без сети", icon: "lock.fill", color: .red)
-                    }
-                } header: {
-                    Text("Подключение")
-                } footer: {
-                    Text("Автоподключение само включит VPN в новой сети. «Без VPN — без сети» не выпустит трафик в обход туннеля.")
-                }
-                .listRowBackground(Theme.card)
+            PageScroll {
+                PageHeader(title: "Настройки")
 
-                Section {
-                    Toggle(isOn: $ruDirect) {
-                        SettingsLabel("Российские сайты напрямую", icon: "house.fill", color: .blue)
+                SCSection(header: "Подключение", footer: "Автоподключение включит VPN в новой сети. «Без VPN — без сети» не выпустит трафик мимо туннеля.") {
+                    Menu {
+                        Picker("Протокол", selection: $transport) {
+                            ForEach(TransportPreference.allCases) { Text($0.title).tag($0) }
+                        }
+                    } label: {
+                        SCRow(title: "Протокол", value: transport.title) {
+                            CellIcon(systemName: "point.3.connected.trianglepath.dotted")
+                        } trailing: {
+                            Image(systemName: "chevron.up.chevron.down")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(Theme.label3)
+                        }
                     }
+                    .buttonStyle(RowButtonStyle())
+                    SCDivider()
+                    ToggleRow(title: "Автоподключение", icon: "bolt", isOn: $autoConnect)
+                    SCDivider()
+                    ToggleRow(title: "Без VPN — без сети", icon: "lock", isOn: $killSwitch)
+                }
+
+                SCSection(header: "Маршрутизация", footer: "Госуслуги, банки и сайты .ru/.рф открываются без VPN — быстрее и без капч.") {
+                    ToggleRow(title: "Российские сайты напрямую", icon: "house", isOn: $ruDirect)
+                    SCDivider()
                     NavigationLink(value: SettingsRoute.exceptions) {
-                        SettingsLabel("Исключения", icon: "list.bullet", color: .teal)
+                        SCRow(title: "Исключения", chevron: true) { CellIcon(systemName: "list.bullet") }
                     }
-                } header: {
-                    Text("Маршрутизация")
-                } footer: {
-                    Text("Госуслуги, банки, маркетплейсы и сайты .ru/.рф открываются без VPN — быстрее и без капч. При белых списках недоступные напрямую сайты пойдут через сервер в России.")
+                    .buttonStyle(RowButtonStyle())
                 }
-                .listRowBackground(Theme.card)
 
-                Section {
-                    Toggle(isOn: $energySaver) {
-                        SettingsLabel("Экономия заряда", icon: "leaf.fill", color: .green)
-                    }
-                } header: {
-                    Text("Батарея")
-                } footer: {
-                    Text("Меньше фоновых проверок и переподключений. Рекомендуем не выключать.")
+                SCSection(header: "Батарея", footer: "Меньше фоновых проверок и переподключений.") {
+                    ToggleRow(title: "Экономия заряда", icon: "leaf", isOn: $energySaver)
                 }
-                .listRowBackground(Theme.card)
 
-                Section("Оформление") {
-                    Picker(selection: $theme) {
-                        ForEach(AppTheme.allCases) { Text($0.title).tag($0) }
-                    } label: {
-                        SettingsLabel("Тема", icon: "circle.lefthalf.filled", color: .indigo)
-                    }
-                }
-                .listRowBackground(Theme.card)
-
-                Section("Помощь") {
+                SCSection(header: "Помощь") {
                     NavigationLink(value: SettingsRoute.diagnostics) {
-                        SettingsLabel("Диагностика", icon: "stethoscope", color: .pink)
+                        SCRow(title: "Диагностика", chevron: true) { CellIcon(systemName: "stethoscope") }
                     }
+                    .buttonStyle(RowButtonStyle())
+                    SCDivider()
                     Link(destination: Config.supportURL) {
-                        SettingsLabel("Поддержка в Telegram", icon: "paperplane.fill", color: Theme.telegram)
+                        SCRow(title: "Поддержка в Telegram") {
+                            CellIcon(systemName: "paperplane")
+                        } trailing: {
+                            Image(systemName: "arrow.up.right")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(Theme.label3)
+                        }
                     }
-                    HStack {
-                        SettingsLabel("Версия", icon: "info.circle.fill", color: .gray)
-                        Spacer()
-                        Text(Config.version).foregroundStyle(.secondary)
-                    }
+                    .buttonStyle(RowButtonStyle())
+                    SCDivider()
+                    SCRow(title: "Версия", value: Config.version) { CellIcon(systemName: "info") }
                 }
-                .listRowBackground(Theme.card)
             }
-            .scrollContentBackground(.hidden)
-            .background(AppBackground())
-            .navigationTitle("Настройки")
+            .toolbar(.hidden, for: .navigationBar)
             .navigationDestination(for: SettingsRoute.self) { route in
                 switch route {
                 case .diagnostics: DiagnosticsView()
@@ -105,6 +90,25 @@ struct SettingsView: View {
     }
 }
 
+struct ToggleRow: View {
+    let title: String
+    let icon: String
+    @Binding var isOn: Bool
+
+    var body: some View {
+        Toggle(isOn: $isOn) {
+            HStack(spacing: 12) {
+                CellIcon(systemName: icon)
+                Text(title).font(.scBody).foregroundStyle(Theme.label).lineLimit(1)
+            }
+        }
+        .tint(Theme.tintStrong)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 9)
+        .frame(minHeight: 52)
+    }
+}
+
 enum ExceptionTarget: String, CaseIterable, Identifiable {
     case vpn, direct
     var id: String { rawValue }
@@ -116,51 +120,68 @@ struct ExceptionsView: View {
     @AppStorage(SettingsKey.directDomains) private var directRaw = ""
     @State private var newDomain = ""
     @State private var target: ExceptionTarget = .vpn
+    @FocusState private var focused: Bool
 
     var body: some View {
-        List {
-            Section {
-                HStack {
-                    TextField("example.com", text: $newDomain)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .keyboardType(.URL)
-                        .onSubmit(add)
-                    Button("Добавить", action: add)
-                        .disabled(normalized(newDomain) == nil)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                VStack(spacing: 10) {
+                    HStack(spacing: 8) {
+                        TextField("", text: $newDomain, prompt: Text("example.com").foregroundStyle(Theme.label3))
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .keyboardType(.URL)
+                            .focused($focused)
+                            .onSubmit(add)
+                            .scField(focused: focused)
+                        Button("Добавить", action: add)
+                            .buttonStyle(.sc(.tinted, small: true))
+                            .disabled(normalized(newDomain) == nil)
+                    }
+                    Picker("Куда", selection: $target) {
+                        ForEach(ExceptionTarget.allCases) { Text($0.title).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    Text("Правило действует и для поддоменов: example.com включает www.example.com.")
+                        .font(.scFoot)
+                        .foregroundStyle(Theme.label2)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 4)
                 }
-                Picker("Куда", selection: $target) {
-                    ForEach(ExceptionTarget.allCases) { Text($0.title).tag($0) }
-                }
-                .pickerStyle(.segmented)
-            } footer: {
-                Text("Правило действует и для поддоменов. Например, example.com включает www.example.com.")
+                section(.vpn, header: "Всегда через VPN")
+                section(.direct, header: "Всегда напрямую")
             }
-            .listRowBackground(Theme.card)
-
-            Section("Всегда через VPN") { rows(.vpn) }
-                .listRowBackground(Theme.card)
-            Section("Всегда напрямую") { rows(.direct) }
-                .listRowBackground(Theme.card)
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
         }
-        .scrollContentBackground(.hidden)
-        .background(AppBackground())
+        .scrollIndicators(.hidden)
+        .contentMargins(.bottom, 110, for: .scrollContent)
+        .background(AppBackground(glow: 0))
         .navigationTitle("Исключения")
         .navigationBarTitleDisplayMode(.inline)
     }
 
-    @ViewBuilder
-    private func rows(_ t: ExceptionTarget) -> some View {
+    private func section(_ t: ExceptionTarget, header: String) -> some View {
         let items = domains(t)
-        if items.isEmpty {
-            Text("Пока пусто").foregroundStyle(.secondary)
-        } else {
-            ForEach(items, id: \.self) { Text($0) }
-                .onDelete { offsets in
-                    var list = domains(t)
-                    list.remove(atOffsets: offsets)
-                    setDomains(list, for: t)
+        return SCSection(header: header) {
+            if items.isEmpty {
+                SCRow(title: "Пока пусто", titleColor: Theme.label3)
+            } else {
+                ForEach(Array(items.enumerated()), id: \.element) { index, domain in
+                    if index > 0 { SCDivider(inset: 16) }
+                    SCRow(title: domain, leading: { EmptyView() }, trailing: {
+                        Button {
+                            remove(domain, from: t)
+                        } label: {
+                            Image(systemName: "minus.circle.fill")
+                                .font(.system(size: 20))
+                                .foregroundStyle(Theme.red)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Удалить \(domain)")
+                    })
                 }
+            }
         }
     }
 
@@ -171,6 +192,10 @@ struct ExceptionsView: View {
     private func setDomains(_ list: [String], for t: ExceptionTarget) {
         let raw = list.joined(separator: "\n")
         if t == .vpn { vpnRaw = raw } else { directRaw = raw }
+    }
+
+    private func remove(_ domain: String, from t: ExceptionTarget) {
+        setDomains(domains(t).filter { $0 != domain }, for: t)
     }
 
     private func normalized(_ s: String) -> String? {

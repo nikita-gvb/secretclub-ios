@@ -14,9 +14,9 @@ xcrun simctl status_bar "$UDID" override --time "9:41" --dataNetwork wifi --wifi
 xcrun simctl install "$UDID" "$APP"
 
 first=1
-for theme in dark light; do
+for theme in dark; do
   xcrun simctl ui "$UDID" appearance "$theme" || true
-  for screen in onboarding home locations subscription settings diagnostics; do
+  for screen in onboarding home disconnected locations subscription settings diagnostics exceptions; do
     xcrun simctl terminate "$UDID" "$BUNDLE" 2>/dev/null || true
     xcrun simctl launch "$UDID" "$BUNDLE" -AppleLanguages "(ru)" -AppleLocale ru_RU \
       -demo YES -screen "$screen" -theme "$theme" >/dev/null

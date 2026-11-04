@@ -4,80 +4,51 @@ struct LocationsView: View {
     @Environment(AppModel.self) private var app
 
     var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 24) {
-                    autoCard
-                    ForEach(RouteGroup.allCases) { group in
-                        section(group)
-                    }
-                }
-                .padding(.horizontal, 20)
-                .padding(.bottom, 28)
+        PageScroll {
+            PageHeader(title: "Локации")
+            autoOption
+            ForEach(RouteGroup.allCases) { group in
+                section(group)
             }
-            .scrollIndicators(.hidden)
-            .background(AppBackground())
-            .navigationTitle("Локации")
         }
     }
 
-    private var autoCard: some View {
+    private var autoOption: some View {
         Button {
             app.selectAuto()
         } label: {
-            HStack(spacing: 14) {
-                ZStack {
-                    Circle().fill(Theme.gradient)
-                    Image(systemName: "sparkles")
-                        .font(.title3.weight(.semibold))
-                        .foregroundStyle(.white)
-                }
-                .frame(width: 46, height: 46)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Авто").font(.headline)
+            HStack(spacing: 12) {
+                CellIcon(systemName: "sparkles", color: Theme.tint, size: 34)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Авто").font(.scHeadline).foregroundStyle(Theme.label)
                     Text("Сам выберет лучший маршрут и переключится, если сеть изменится")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .font(.scFoot)
+                        .foregroundStyle(Theme.label2)
                         .multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                Spacer()
-                SelectionMark(selected: app.autoMode)
+                Spacer(minLength: 8)
+                CheckMark(on: app.autoMode)
             }
-            .card()
-            .overlay(
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .strokeBorder(app.autoMode ? Theme.accent.opacity(0.6) : .clear, lineWidth: 1.5)
-            )
+            .padding(.horizontal, 16)
+            .padding(.vertical, 14)
+            .background(app.autoMode ? Theme.tint.opacity(0.1) : Theme.cell.opacity(0.9), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(app.autoMode ? Theme.tint.opacity(0.75) : Theme.border, lineWidth: app.autoMode ? 1 : 0.5))
+            .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         }
         .buttonStyle(.plain)
+        .animation(.easeOut(duration: 0.2), value: app.autoMode)
     }
 
     private func section(_ group: RouteGroup) -> some View {
         let items = app.routes.filter { $0.group == group }
-        return VStack(alignment: .leading, spacing: 10) {
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 8) {
-                    Image(systemName: group.icon).foregroundStyle(group.color)
-                    Text(group.title).font(.headline)
-                }
-                Text(group.subtitle)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            .padding(.horizontal, 4)
-
-            VStack(spacing: 0) {
-                ForEach(Array(items.enumerated()), id: \.element.id) { index, route in
-                    RouteRow(route: route, selected: !app.autoMode && app.selectedRouteID == route.id) {
-                        app.select(route)
-                    }
-                    if index < items.count - 1 {
-                        Divider().padding(.leading, 64)
-                    }
+        return SCSection(header: group.title, footer: group.subtitle) {
+            ForEach(Array(items.enumerated()), id: \.element.id) { index, route in
+                if index > 0 { SCDivider(inset: 58) }
+                RouteRow(route: route, selected: !app.autoMode && app.selectedRouteID == route.id) {
+                    app.select(route)
                 }
             }
-            .background(Theme.card, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).strokeBorder(Theme.cardStroke))
         }
     }
 }
@@ -89,20 +60,17 @@ struct RouteRow: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 14) {
-                FlagBadge(code: route.countryCode, size: 38)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(route.country).font(.body.weight(.medium))
-                    Text(route.detail).font(.caption).foregroundStyle(.secondary)
-                }
-                Spacer()
+            SCRow(title: route.country, subtitle: route.detail) {
+                Flag(code: route.countryCode)
+            } trailing: {
                 PingLabel(ms: route.ping)
-                SelectionMark(selected: selected)
+                Image(systemName: "checkmark")
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(Theme.tint)
+                    .opacity(selected ? 1 : 0)
+                    .frame(width: 18)
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 12)
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(RowButtonStyle())
     }
 }

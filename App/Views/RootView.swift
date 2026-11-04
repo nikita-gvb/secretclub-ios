@@ -26,19 +26,20 @@ struct MainTabView: View {
 
     var body: some View {
         @Bindable var app = app
-        TabView(selection: $app.selectedTab) {
-            HomeView()
-                .tabItem { Label("Главная", systemImage: "power.circle.fill") }
-                .tag(AppTab.home)
-            LocationsView()
-                .tabItem { Label("Локации", systemImage: "globe.europe.africa.fill") }
-                .tag(AppTab.locations)
-            SubscriptionView()
-                .tabItem { Label("Подписка", systemImage: "crown.fill") }
-                .tag(AppTab.subscription)
-            SettingsView()
-                .tabItem { Label("Настройки", systemImage: "gearshape.fill") }
-                .tag(AppTab.settings)
+        ZStack(alignment: .bottom) {
+            Group {
+                switch app.selectedTab {
+                case .home: HomeView()
+                case .locations: LocationsView()
+                case .subscription: SubscriptionView()
+                case .settings: SettingsView()
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            SCTabBar(selection: $app.selectedTab)
+                .padding(.bottom, 2)
         }
+        .background(Theme.background.ignoresSafeArea())
+        .ignoresSafeArea(.keyboard)
     }
 }

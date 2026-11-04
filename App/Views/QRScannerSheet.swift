@@ -35,7 +35,7 @@ struct QRScannerSheet: View {
                     VStack {
                         Spacer()
                         Text(error)
-                            .font(.subheadline.weight(.medium))
+                            .font(.onest(15, .medium, relativeTo: .subheadline))
                             .padding(12)
                             .background(.ultraThinMaterial, in: Capsule())
                             .padding(.bottom, 40)

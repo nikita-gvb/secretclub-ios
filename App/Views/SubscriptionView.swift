@@ -6,137 +6,96 @@ struct SubscriptionView: View {
     @State private var confirmLogout = false
 
     var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(spacing: 16) {
-                    planCard
-                    devicesCard
-                    VStack(spacing: 12) {
-                        Button {
-                            openURL(Config.botURL)
-                        } label: {
-                            Label("Продлить в Telegram-боте", systemImage: "paperplane.fill")
-                        }
-                        .buttonStyle(PrimaryButtonStyle())
-
-                        Button {
-                            Task { await app.refreshNetwork() }
-                        } label: {
-                            Label("Обновить данные", systemImage: "arrow.clockwise")
-                        }
-                        .buttonStyle(SecondaryButtonStyle())
-
-                        Button(role: .destructive) {
-                            confirmLogout = true
-                        } label: {
-                            Text("Выйти из аккаунта")
-                                .font(.subheadline.weight(.medium))
-                                .foregroundStyle(Theme.danger)
-                        }
-                        .padding(.top, 4)
-                    }
-                    .padding(.top, 4)
+        PageScroll {
+            PageHeader(title: "Подписка")
+            hero
+            devicesSection
+            SCSection(footer: "Продление и оплата — в Telegram-боте. После оплаты данные обновятся сами.") {
+                Button { openURL(Config.botURL) } label: {
+                    SCRow(title: "Открыть бота", chevron: true) { CellIcon(systemName: "paperplane") }
                 }
-                .padding(.horizontal, 20)
-                .padding(.bottom, 28)
+                .buttonStyle(RowButtonStyle())
+                SCDivider()
+                Button { openURL(Config.supportURL) } label: {
+                    SCRow(title: "Поддержка", chevron: true) { CellIcon(systemName: "questionmark.bubble") }
+                }
+                .buttonStyle(RowButtonStyle())
             }
-            .scrollIndicators(.hidden)
-            .background(AppBackground())
-            .navigationTitle("Подписка")
-            .confirmationDialog("Выйти из аккаунта?", isPresented: $confirmLogout, titleVisibility: .visible) {
-                Button("Выйти", role: .destructive) { app.logout() }
-                Button("Отмена", role: .cancel) {}
-            } message: {
-                Text("VPN отключится, ссылку на подписку нужно будет ввести заново.")
+            SCSection {
+                Button { confirmLogout = true } label: {
+                    SCRow(title: "Выйти из аккаунта", titleColor: Theme.red)
+                }
+                .buttonStyle(RowButtonStyle())
             }
+        }
+        .confirmationDialog("Выйти из аккаунта?", isPresented: $confirmLogout, titleVisibility: .visible) {
+            Button("Выйти", role: .destructive) { app.logout() }
+            Button("Отмена", role: .cancel) {}
+        } message: {
+            Text("VPN отключится, ссылку на подписку нужно будет ввести заново.")
         }
     }
 
-    private var planCard: some View {
+    private var hero: some View {
         let sub = app.subscription
+        let free = max(0, sub.deviceLimit - sub.devices.count)
         return VStack(alignment: .leading, spacing: 16) {
             HStack {
-                HStack(spacing: 8) {
-                    LogoMark(size: 26).shadow(radius: 0)
-                    Text("SecretClub").font(.subheadline.weight(.semibold))
-                }
+                StatusPill(text: sub.isActive ? "Активна" : "Закончилась", color: sub.isActive ? Theme.green : Theme.red)
                 Spacer()
-                Text(sub.isActive ? "Активна" : "Истекла")
-                    .font(.caption.weight(.bold))
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
-                    .background(.white.opacity(0.2), in: Capsule())
+                Text(sub.plan).font(.scFoot).foregroundStyle(Theme.label2)
             }
-            Text(sub.plan)
-                .font(.system(size: 34, weight: .heavy, design: .rounded))
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("до \(Format.date(sub.expiresAt))")
-                    Spacer()
-                    Text("ещё \(sub.daysLeft) \(Format.plural(sub.daysLeft, "день", "дня", "дней"))")
-                }
-                .font(.subheadline.weight(.medium))
-                ProgressView(value: sub.progress)
-                    .tint(.white)
-            }
-            Rectangle().fill(.white.opacity(0.2)).frame(height: 1)
-            HStack(alignment: .top) {
-                stat("Трафик", value: Format.bytes(sub.usedBytes), suffix: sub.limitBytes.map { "из \(Format.bytes($0))" } ?? "безлимит")
-                Spacer()
-                stat("Устройства", value: "\(sub.devices.count) из \(sub.deviceLimit)", suffix: "подключено")
-            }
-        }
-        .foregroundStyle(.white)
-        .padding(20)
-        .background(
-            ZStack {
-                Theme.gradient
-                Circle().fill(.white.opacity(0.10)).frame(width: 220, height: 220).offset(x: 130, y: -90)
-                Circle().fill(.white.opacity(0.06)).frame(width: 160, height: 160).offset(x: -140, y: 110)
-            }
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
-        .shadow(color: Theme.accent.opacity(0.35), radius: 22, y: 10)
-    }
-
-    private func stat(_ title: String, value: String, suffix: String) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(title).font(.caption).opacity(0.8)
-            Text(value).font(.headline.monospacedDigit())
-            Text(suffix).font(.caption2).opacity(0.75)
-        }
-    }
-
-    private var devicesCard: some View {
-        let sub = app.subscription
-        return VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                Text("Устройства").font(.headline)
-                Spacer()
-                Text("\(sub.devices.count) из \(sub.deviceLimit)")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-            }
-            ForEach(sub.devices) { device in
-                HStack(spacing: 12) {
-                    IconTile(systemName: device.icon, color: Theme.accent, size: 38)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(device.name).font(.subheadline.weight(.medium))
-                        Text(device.isCurrent ? "Это устройство" : Format.lastSeen(device.lastSeen))
-                            .font(.caption)
-                            .foregroundStyle(device.isCurrent ? Theme.success : Color.secondary)
+            HStack(alignment: .center, spacing: 16) {
+                VStack(alignment: .leading, spacing: 4) {
+                    if sub.isActive {
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            HeroNumber(text: "\(sub.daysLeft)")
+                            Text(Format.plural(sub.daysLeft, "день", "дня", "дней"))
+                                .font(.scTitle3)
+                                .foregroundStyle(Theme.label2)
+                        }
+                        Text("до \(Format.date(sub.expiresAt))").font(.scSub).foregroundStyle(Theme.label2)
+                    } else {
+                        Text("Подписка закончилась").font(.scTitle1).foregroundStyle(Theme.label)
+                        Text("Продлите в боте — VPN включится сам").font(.scSub).foregroundStyle(Theme.label2)
                     }
-                    Spacer()
+                }
+                Spacer(minLength: 0)
+                HeroBadge(systemName: sub.isActive ? "checkmark.shield" : "xmark.shield", color: sub.isActive ? Theme.green : Theme.red)
+            }
+            HStack(spacing: 8) {
+                StatTile(label: "Трафик",
+                         value: sub.limitBytes.map { Format.bytes(max(0, $0 - sub.usedBytes)) } ?? "Безлимит",
+                         hint: sub.limitBytes.map { "из \(Format.bytes($0))" } ?? "использовано \(Format.bytes(sub.usedBytes))",
+                         progress: sub.limitBytes.map { Double(sub.usedBytes) / Double(max(1, $0)) })
+                StatTile(label: "Устройства", value: "\(sub.devices.count) из \(sub.deviceLimit)", hint: free > 0 ? "свободно \(free)" : "мест нет")
+            }
+            HStack(spacing: 10) {
+                Button("Продлить") { openURL(Config.botURL) }
+                    .buttonStyle(.scPrimary)
+                RoundIconButton(systemName: "arrow.clockwise") {
+                    Task { await app.refreshNetwork() }
+                }
+                .accessibilityLabel("Обновить")
+            }
+        }
+        .heroCard()
+    }
+
+    private var devicesSection: some View {
+        let sub = app.subscription
+        return SCSection(header: "Устройства") {
+            ForEach(Array(sub.devices.enumerated()), id: \.element.id) { index, device in
+                if index > 0 { SCDivider() }
+                SCRow(title: device.name, subtitle: device.isCurrent ? "Это устройство" : Format.lastSeen(device.lastSeen)) {
+                    CellIcon(systemName: device.icon)
+                } trailing: {
                     if !device.isCurrent {
                         Button("Отвязать") {}
-                            .font(.caption.weight(.semibold))
-                            .buttonStyle(.bordered)
-                            .buttonBorderShape(.capsule)
-                            .tint(.secondary)
+                            .buttonStyle(.sc(.secondary, small: true))
                     }
                 }
             }
         }
-        .card()
     }
 }

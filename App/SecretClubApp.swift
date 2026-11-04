@@ -3,14 +3,18 @@ import SwiftUI
 @main
 struct SecretClubApp: App {
     @State private var model = AppModel()
-    @AppStorage(SettingsKey.theme) private var theme: AppTheme = .dark
+
+    init() {
+        Appearance.apply()
+    }
 
     var body: some Scene {
         WindowGroup {
             RootView()
                 .environment(model)
-                .preferredColorScheme(theme.colorScheme)
-                .tint(Theme.accent)
+                .preferredColorScheme(.dark)
+                .tint(Theme.tint)
+                .font(.scBody)
                 .onOpenURL { model.handle(url: $0) }
         }
     }

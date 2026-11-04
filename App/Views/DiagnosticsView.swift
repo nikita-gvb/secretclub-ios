@@ -8,20 +8,22 @@ struct DiagnosticsView: View {
 
     var body: some View {
         ScrollView {
-            VStack(spacing: 16) {
-                networkCard
-                permissionCard
-                routesCard
+            VStack(alignment: .leading, spacing: 0) {
+                permissionHero
+                networkSection
+                routesSection
                 ShareLink(item: report) {
                     Label("Поделиться отчётом", systemImage: "square.and.arrow.up")
                 }
-                .buttonStyle(SecondaryButtonStyle())
+                .buttonStyle(.scSecondary)
+                .padding(.top, 26)
             }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 12)
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
         }
         .scrollIndicators(.hidden)
-        .background(AppBackground())
+        .contentMargins(.bottom, 110, for: .scrollContent)
+        .background(AppBackground(glow: 0))
         .navigationTitle("Диагностика")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear {
@@ -29,73 +31,34 @@ struct DiagnosticsView: View {
         }
     }
 
-    private var networkCard: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 12) {
-                IconTile(systemName: app.networkMode.icon, color: app.networkMode.color, size: 44)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Состояние сети").font(.caption).foregroundStyle(.secondary)
-                    Text(app.networkMode.title).font(.headline)
-                }
-                Spacer()
-                if isProbing { ProgressView() }
-            }
-            Text(app.networkMode.explanation)
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-            VStack(spacing: 10) {
-                ForEach(app.probes) { p in
-                    HStack(spacing: 8) {
-                        Image(systemName: p.ms != nil ? "checkmark.circle.fill" : "xmark.circle.fill")
-                            .foregroundStyle(p.ms != nil ? Theme.success : Theme.danger)
-                        Text(p.title).font(.subheadline)
-                        Text(p.isDomestic ? "РФ" : "зарубеж")
-                            .font(.caption2.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Color.secondary.opacity(0.12), in: Capsule())
-                        Spacer()
-                        Text(p.ms.map { "\($0) мс" } ?? "нет ответа")
-                            .font(.subheadline.monospacedDigit())
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-            Button {
-                Task {
-                    isProbing = true
-                    await app.refreshNetwork()
-                    isProbing = false
-                }
-            } label: {
-                Label("Проверить снова", systemImage: "arrow.clockwise")
-                    .font(.subheadline.weight(.semibold))
-            }
-            .disabled(isProbing)
-        }
-        .card()
-    }
+    private var allOK: Bool { !steps.isEmpty && steps.allSatisfy(\.ok) }
 
-    private var permissionCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 12) {
-                IconTile(systemName: "checkmark.shield.fill", color: Theme.accent, size: 44)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Разрешение VPN").font(.headline)
-                    Text("Проверка подписи приложения").font(.caption).foregroundStyle(.secondary)
+    private var permissionHero: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .center, spacing: 16) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Разрешение VPN").font(.scTitle3).foregroundStyle(Theme.label)
+                    Text("Проверяет, поддерживает ли сертификат VPN: создаёт профиль и поднимает пробный туннель без перенаправления трафика.")
+                        .font(.scSub)
+                        .foregroundStyle(Theme.label2)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                Spacer()
-                if isTesting { ProgressView() }
+                Spacer(minLength: 0)
+                if isTesting {
+                    ProgressView().tint(Theme.tint).frame(width: 56, height: 56)
+                } else if !steps.isEmpty {
+                    HeroBadge(systemName: allOK ? "checkmark.shield" : "xmark.shield", color: allOK ? Theme.green : Theme.red)
+                }
             }
-            Text("Создаёт VPN-профиль и запускает пробный туннель без перенаправления трафика. Так видно, поддерживает ли ваш сертификат VPN.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-            ForEach(steps) { s in
-                HStack(alignment: .top, spacing: 8) {
-                    Image(systemName: s.ok ? "checkmark.circle.fill" : "xmark.octagon.fill")
-                        .foregroundStyle(s.ok ? Theme.success : Theme.danger)
-                    Text(s.text).font(.subheadline)
+            if !steps.isEmpty {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(steps) { s in
+                        HStack(alignment: .top, spacing: 10) {
+                            Image(systemName: s.ok ? "checkmark.circle.fill" : "xmark.circle.fill")
+                                .foregroundStyle(s.ok ? Theme.green : Theme.red)
+                            Text(s.text).font(.scSub).foregroundStyle(Theme.label)
+                        }
+                    }
                 }
             }
             Button {
@@ -106,29 +69,58 @@ struct DiagnosticsView: View {
                     isTesting = false
                 }
             } label: {
-                Label("Запустить тест", systemImage: "play.fill")
+                Text(steps.isEmpty ? "Запустить тест" : "Повторить тест")
             }
-            .buttonStyle(PrimaryButtonStyle())
+            .buttonStyle(.scPrimary)
             .disabled(isTesting)
         }
-        .card()
+        .heroCard()
     }
 
-    private var routesCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Задержка до серверов").font(.headline)
-            ForEach(app.routes.prefix(6)) { r in
-                HStack(spacing: 10) {
-                    Text(r.flag)
-                    Text(r.country).font(.subheadline)
-                    GroupTag(group: r.group)
-                    Text(r.transport.title).font(.caption).foregroundStyle(.secondary)
-                    Spacer()
+    private var networkSection: some View {
+        SCSection(header: "Сеть", footer: app.networkMode.explanation) {
+            SCRow(title: app.networkMode.title) {
+                CellIcon(systemName: app.networkMode.icon, color: app.networkMode.color)
+            } trailing: {
+                if isProbing { ProgressView() }
+            }
+            ForEach(app.probes) { p in
+                SCDivider()
+                SCRow(title: p.title, subtitle: p.isDomestic ? "Россия" : "Зарубежный", value: p.ms.map { "\($0) мс" } ?? "нет ответа") {
+                    Image(systemName: p.ms != nil ? "checkmark.circle.fill" : "xmark.circle.fill")
+                        .font(.system(size: 20))
+                        .foregroundStyle(p.ms != nil ? Theme.green : Theme.red)
+                        .frame(width: 30, height: 30)
+                }
+            }
+            SCDivider()
+            Button {
+                Task {
+                    isProbing = true
+                    await app.refreshNetwork()
+                    isProbing = false
+                }
+            } label: {
+                SCRow(title: "Проверить снова", titleColor: Theme.tint) {
+                    CellIcon(systemName: "arrow.clockwise", color: Theme.tint)
+                }
+            }
+            .buttonStyle(RowButtonStyle())
+            .disabled(isProbing)
+        }
+    }
+
+    private var routesSection: some View {
+        SCSection(header: "Задержка до серверов") {
+            ForEach(Array(app.routes.prefix(6).enumerated()), id: \.element.id) { index, r in
+                if index > 0 { SCDivider() }
+                SCRow(title: r.country, subtitle: "\(r.group.shortTitle) · \(r.transport.title)") {
+                    Flag(code: r.countryCode)
+                } trailing: {
                     PingLabel(ms: r.ping)
                 }
             }
         }
-        .card()
     }
 
     private var report: String {

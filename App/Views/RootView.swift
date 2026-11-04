@@ -15,7 +15,10 @@ struct RootView: View {
             }
         }
         .animation(.easeInOut(duration: 0.3), value: app.isLoggedIn)
-        .task { await app.start() }
+        .task {
+            await app.start()
+            if app.isDemo { await Self.markRendered() }
+        }
         .onChange(of: scenePhase) { _, phase in
             switch phase {
             case .active: Task { await app.becameActive() }
@@ -23,6 +26,15 @@ struct RootView: View {
             default: break
             }
         }
+    }
+}
+
+extension RootView {
+    /// Для скриптов скриншотов в CI: сигнал, что первый экран отрисован.
+    static func markRendered() async {
+        try? await Task.sleep(for: .seconds(1.5))
+        guard let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else { return }
+        try? Data("ok".utf8).write(to: dir.appendingPathComponent("shot-ready"))
     }
 }
 

@@ -36,6 +36,8 @@ targets:
       path: Support/SecretClub-Info.plist
       properties:
         CFBundleDisplayName: SecretClub
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         CFBundleLocalizations: [ru]
         LSRequiresIPhoneOS: true
         ITSAppUsesNonExemptEncryption: false
@@ -75,6 +77,8 @@ targets:
       path: Support/PacketTunnel-Info.plist
       properties:
         CFBundleDisplayName: SecretClub Tunnel
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
           NSAllowsLocalNetworking: true

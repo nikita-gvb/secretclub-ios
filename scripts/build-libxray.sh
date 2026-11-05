@@ -3,7 +3,9 @@
 # с нашим memory_ios.go (scripts/libxray). Нужны Xcode и Go; запускается в CI на macOS.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-DEST=${1:-$ROOT/Vendor}
+DEST_ARG=${1:-$ROOT/Vendor}
+mkdir -p "$DEST_ARG"
+DEST=$(cd "$DEST_ARG" && pwd)
 SHA=$(tr -d '[:space:]' < "$ROOT/scripts/libxray/COMMIT")
 WORK=${RUNNER_TEMP:-/tmp}/libxray-src
 rm -rf "$WORK" && mkdir -p "$WORK" && cd "$WORK"

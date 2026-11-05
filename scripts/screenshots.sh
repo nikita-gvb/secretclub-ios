@@ -14,9 +14,9 @@ xcrun simctl status_bar "$UDID" override --time "9:41" --dataNetwork wifi --wifi
 xcrun simctl install "$UDID" "$APP"
 
 first=1
-for theme in dark; do
+for theme in dark light; do
   xcrun simctl ui "$UDID" appearance "$theme" || true
-  for screen in onboarding login home disconnected locations subscription settings diagnostics exceptions; do
+  for screen in onboarding login home disconnected connecting failed expired waiting summary servers settings subscription devices check appearance advanced exceptions; do
     xcrun simctl terminate "$UDID" "$BUNDLE" 2>/dev/null || true
     DATA=$(xcrun simctl get_app_container "$UDID" "$BUNDLE" data)
     rm -f "$DATA/Library/Caches/shot-ready"

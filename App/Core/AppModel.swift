@@ -3,7 +3,17 @@ import Observation
 import Network
 
 enum AppTab: String, Hashable {
-    case home, locations, subscription, settings
+    case home, settings
+}
+
+/// Семь состояний кнопки. Главный экран рисуется только от них.
+enum PowerState: Equatable {
+    case off, connecting, connected, switching, waiting, failed, expired
+}
+
+/// Тип сети: для плитки «Сеть» в сводке.
+enum PathKind: Equatable {
+    case unknown, wifi, cellular, wired, offline
 }
 
 enum LoginPhase: Equatable {
@@ -52,6 +62,16 @@ final class AppModel {
     var tunnelHealthy: Bool?
     /// Сообщение от «Авто» в расширении: на что и почему переключились.
     var autoNotice: String?
+    /// Плашка сверху экрана.
+    var toast: ToastMessage?
+    /// Меняем сервер, не выключая VPN.
+    var isSwitching = false
+    /// Сети нет совсем (по системе) и какой интерфейс основной.
+    var pathOffline = false
+    var pathKind: PathKind = .unknown
+    /// Стек «Настроек» и шторка серверов — чтобы открывать их из любого места.
+    var settingsPath: [SettingsRoute] = []
+    var showServers = false
 
     @ObservationIgnored private var configs: [String: [String: Any]] = [:]
     @ObservationIgnored private var primaryParsed: ParsedSubscription?
@@ -67,6 +87,9 @@ final class AppModel {
     @ObservationIgnored private var pathSignature: String?
     @ObservationIgnored private var lastNoteID = 0
     @ObservationIgnored private let defaults = UserDefaults.standard
+    /// Номер текущей попытки подключения: новое нажатие отменяет старую.
+    @ObservationIgnored private var connectToken = 0
+    @ObservationIgnored private var toastTask: Task<Void, Never>?
 
     let vpn = VPNController()
     let isDemo: Bool
@@ -85,15 +108,34 @@ final class AppModel {
             autoRouteID = DemoData.routes.first?.id
             isLoggedIn = initialScreen != "onboarding" && initialScreen != "login"
             networkMode = .normal
+            pathKind = .wifi
             probes = DemoData.probes
-            vpn.enableDemo(connected: initialScreen != "disconnected" && initialScreen != "locations")
+            let screen = initialScreen ?? "home"
+            vpn.enableDemo(connected: !["disconnected", "failed", "expired", "connecting"].contains(screen))
             connectedRouteID = autoRouteID
-            if initialScreen == "login" {
+            pingedAt = Date()
+            switch screen {
+            case "login":
                 showLogin = true
                 loginPhase = .waiting
                 loginTicket = DemoData.loginTicket
+            case "servers":
+                showServers = true
+                pingingIDs = ["de-cdn", "ru-cdn"]
+            case "connecting":
+                vpn.state = .connecting
+            case "failed":
+                vpn.lastError = "Сервер не ответил. Попробуйте ещё раз или выберите другой сервер."
+            case "expired":
+                subscription.status = .expired
+                subscription.expiresAt = Date().addingTimeInterval(-86400)
+                reserve = nil
+            case "waiting":
+                pathOffline = true
+                pathKind = .offline
+            default:
+                break
             }
-            if initialScreen == "locations" { pingingIDs = ["de-cdn", "ru-cdn"] }
         } else {
             let session = Keychain.read(Keychain.sessionKey) != nil
             hasSession = session
@@ -112,9 +154,13 @@ final class AppModel {
         vpn.onReport = { [weak self] report in self?.apply(report) }
 
         switch initialScreen {
-        case "locations": selectedTab = .locations
-        case "subscription": selectedTab = .subscription
-        case "settings", "diagnostics", "exceptions": selectedTab = .settings
+        case "settings": selectedTab = .settings
+        case "subscription": selectedTab = .settings; settingsPath = [.subscription]
+        case "devices": selectedTab = .settings; settingsPath = [.devices]
+        case "check", "diagnostics": selectedTab = .settings; settingsPath = [.check]
+        case "appearance": selectedTab = .settings; settingsPath = [.appearance]
+        case "advanced": selectedTab = .settings; settingsPath = [.advanced]
+        case "exceptions": selectedTab = .settings; settingsPath = [.exceptions]
         default: selectedTab = .home
         }
     }
@@ -629,8 +675,17 @@ final class AppModel {
 
     /// Сменился Wi‑Fi/мобильный интернет: старые замеры и режим сети больше не верны.
     private func pathChanged(_ signature: String) {
+        let offline = signature == "none"
+        if pathOffline != offline { pathOffline = offline }
         // Когда VPN включён, приложению может быть виден только туннель — это не смена сети.
         guard signature != "other" else { return }
+        let kind: PathKind
+        if offline { kind = .offline }
+        else if signature.hasPrefix("wifi") { kind = .wifi }
+        else if signature.hasPrefix("cellular") { kind = .cellular }
+        else if signature.hasPrefix("wired") { kind = .wired }
+        else { kind = .unknown }
+        if pathKind != kind { pathKind = kind }
         let previous = pathSignature
         pathSignature = signature
         guard let previous, previous != signature else { return }
@@ -658,7 +713,7 @@ final class AppModel {
             Task {
                 try? await Task.sleep(for: .seconds(1))
                 await refreshNetwork()
-                if selectedTab == .locations || !energySaver { await pingAll() }
+                if showServers || !energySaver { await pingAll() }
             }
         case .preparing, .disconnecting:
             networkMode = .unknown
@@ -683,8 +738,11 @@ final class AppModel {
             pingAt[id] = Date()
         }
         if report.noteID > lastNoteID {
+            let first = lastNoteID == 0
             lastNoteID = report.noteID
             autoNotice = report.note
+            // Первое сообщение после запуска приложения — старое, его не показываем.
+            if !first, let note = report.note { showToast(note, icon: "arrow.triangle.2.circlepath") }
         }
     }
 
@@ -842,7 +900,7 @@ final class AppModel {
             let list = candidates(group)
             guard !list.isEmpty else { continue }
             if !isFresh(list) {
-                phase = "Ищем быстрый сервер: \(group.shortTitle)…"
+                phase = group.searchPhase
                 await ping(list.map(\.id))
             }
             let updated = candidates(group)
@@ -921,17 +979,32 @@ final class AppModel {
 
     func toggleConnection() async {
         switch vpn.state {
-        case .connected, .connecting, .disconnecting:
-            await vpn.disconnect()
-        case .preparing:
-            break
+        case .connected, .connecting, .disconnecting, .preparing:
+            await disconnect()
         case .disconnected, .invalid:
             await connect()
         }
     }
 
+    /// Выключить VPN или отменить подключение, которое ещё идёт.
+    func disconnect() async {
+        connectToken += 1
+        phase = nil
+        isSwitching = false
+        vpn.lastError = nil
+        if vpn.state == .preparing {
+            vpn.cancelPreparing(nil)
+            return
+        }
+        await vpn.disconnect()
+        vpn.lastError = nil
+    }
+
     func connect() async {
+        connectToken += 1
+        let token = connectToken
         if isDemo {
+            vpn.lastError = nil
             if let r = activeRoute, let req = demoRequest(r) { try? await vpn.connect(req) }
             return
         }
@@ -941,6 +1014,7 @@ final class AppModel {
         if routes.isEmpty {
             phase = "Загружаем серверы…"
             await refreshSubscription()
+            guard token == connectToken else { return }
         }
         guard !routes.isEmpty else {
             phase = nil
@@ -950,17 +1024,20 @@ final class AppModel {
         let route: Route?
         if autoMode {
             route = await pickAuto()
+            guard token == connectToken else { return }
             autoRouteID = route?.id
         } else {
             route = routes.first { $0.id == selectedRouteID }
         }
         guard let route else {
             phase = nil
-            vpn.cancelPreparing(autoMode ? "Ни один сервер не ответил. Проверьте интернет или выберите локацию вручную." : "Выберите локацию.")
+            vpn.cancelPreparing(autoMode ? "Ни один сервер не ответил. Проверьте интернет или выберите сервер вручную." : "Выберите сервер.")
             return
         }
-        phase = "Проверяем конфиг…"
-        if let problem = await validate(route) {
+        phase = "Проверяем сервер…"
+        let problem = await validate(route)
+        guard token == connectToken else { return }
+        if let problem {
             phase = nil
             vpn.cancelPreparing(problem)
             return
@@ -976,6 +1053,7 @@ final class AppModel {
         do {
             try await vpn.connect(req)
         } catch {
+            guard token == connectToken else { return }
             vpn.lastError = error.localizedDescription
             if autoMode, let index = routes.firstIndex(where: { $0.id == route.id }) {
                 routes[index].unavailable = true
@@ -994,7 +1072,10 @@ final class AppModel {
             await syncPool()
             return
         }
+        isSwitching = true
+        defer { isSwitching = false }
         if isDemo {
+            try? await Task.sleep(for: .seconds(1.3))
             connectedRouteID = route.id
             return
         }
@@ -1052,15 +1133,133 @@ final class AppModel {
     func autoConnectChanged(_ enabled: Bool) {
         Task { await vpn.setOnDemand(enabled) }
     }
+
+    // MARK: - Состояние кнопки
+
+    /// Подписка (или хотя бы резерв) позволяет подключаться.
+    var subscriptionUsable: Bool { subscription.isActive || (reserve?.isActive ?? false) }
+
+    var isOffline: Bool { pathOffline || networkMode == .offline }
+
+    var power: PowerState {
+        switch vpn.state {
+        case .preparing, .connecting:
+            return isOffline ? .waiting : .connecting
+        case .connected:
+            if isOffline { return .waiting }
+            if isSwitching { return .switching }
+            if autoMode, vpn.report?.checking == true, tunnelHealthy == false { return .switching }
+            return .connected
+        case .disconnecting:
+            return .off
+        case .disconnected, .invalid:
+            if !subscriptionUsable && !needsConsent && !needsSubscription { return .expired }
+            return vpn.lastError != nil ? .failed : .off
+        }
+    }
+
+    /// Сервер, который показываем в капсуле и сводке.
+    var displayRoute: Route? {
+        switch power {
+        case .connected, .switching, .waiting:
+            return routes.first { $0.id == connectedRouteID } ?? activeRoute
+        default:
+            return autoMode ? nil : routes.first { $0.id == selectedRouteID }
+        }
+    }
+
+    /// Сейчас идёт замер всех серверов.
+    var isMeasuring: Bool { isPinging || !pingingIDs.isEmpty }
+
+    /// Самый быстрый из обычных серверов по последним замерам.
+    var fastestRouteID: String? {
+        routes.filter { $0.group != .reserve && $0.ping != nil && !$0.unavailable }
+            .min { ($0.ping ?? .max) < ($1.ping ?? .max) }?.id
+    }
+
+    /// Нажатие на кнопку.
+    func tapPower() {
+        switch power {
+        case .expired:
+            showToast("Подписка закончилась — продлите в Telegram", icon: "creditcard", tone: .bad)
+        case .off, .failed:
+            Task { await connect() }
+        case .connecting, .connected, .switching, .waiting:
+            Task { await disconnect() }
+        }
+    }
+
+    /// Выбор в шторке серверов: nil — «Авто». Если VPN выключен — сразу подключаемся.
+    func choose(_ route: Route?) {
+        let changed = route.map { autoMode || selectedRouteID != $0.id } ?? !autoMode
+        if let route { select(route) } else { selectAuto() }
+        guard changed else { return }
+        if power == .off || power == .failed { Task { await connect() } }
+    }
+
+    /// Плашки на переходах состояний (вызывается из корня).
+    func powerChanged(from old: PowerState, to new: PowerState) {
+        switch (old, new) {
+        case (.connected, .waiting), (.switching, .waiting):
+            showToast("Нет интернета — подключимся сами, когда появится", icon: "wifi.slash", tone: .bad)
+        case (.waiting, .connected):
+            showToast("Интернет вернулся — снова под защитой", icon: "checkmark.shield.fill", tone: .good)
+        default:
+            break
+        }
+    }
+
+    func showToast(_ text: String, icon: String = "arrow.triangle.2.circlepath", tone: ToastMessage.Tone = .neutral) {
+        toastTask?.cancel()
+        let message = ToastMessage(text: text, icon: icon, tone: tone)
+        let hadToast = toast != nil
+        toastTask = Task { [weak self] in
+            if hadToast {
+                self?.toast = nil
+                try? await Task.sleep(for: .milliseconds(260))
+            }
+            guard !Task.isCancelled else { return }
+            self?.toast = message
+            try? await Task.sleep(for: .seconds(3.6))
+            guard !Task.isCancelled, self?.toast?.id == message.id else { return }
+            self?.toast = nil
+        }
+    }
+
+    func dismissToast() {
+        toastTask?.cancel()
+        toast = nil
+    }
+
+    // MARK: - Отчёт для поддержки
+
+    func supportReport(steps: [String] = []) -> String {
+        var lines = ["SecretClub \(Config.version)", "Сеть: \(networkMode.title), интерфейс: \(pathKind)"]
+        lines += probes.map { "  \($0.title): \($0.ms.map { "\($0) мс" } ?? "нет ответа")" }
+        lines.append("VPN: \(String(describing: vpn.state)), кнопка: \(String(describing: power))")
+        if let r = vpn.report {
+            lines.append("Ядро: \(r.coreVersion), работает: \(r.running ? "да" : "нет")\(r.memoryMB.map { ", память \(Int($0)) МБ" } ?? "")")
+            if let e = r.error { lines.append("Ошибка ядра: \(e)") }
+            if let h = r.healthy { lines.append("Сервер отвечает: \(h ? "да" : "нет")\(r.pingMS.map { ", \($0) мс" } ?? "")") }
+        }
+        if let route = activeRoute { lines.append("Маршрут: \(route.remarks) [\(route.group.rawValue), \(route.transportTitle)]") }
+        lines.append("Режим: \(autoMode ? "Авто" : "вручную"), способ: \(TransportPreference(rawValue: defaults.string(forKey: SettingsKey.transport) ?? "")?.title ?? "Авто")")
+        lines.append("Серверов: \(routes.count), подписка: \(subscription.plan), \(subscription.status.title)")
+        lines += steps.map { "  \($0)" }
+        lines += routes.prefix(30).map { "  \($0.remarks): \($0.unavailable ? "нет ответа" : ($0.ping.map { "\($0) мс" } ?? "—"))" }
+        if let e = vpn.lastError { lines.append("Ошибка: \(e)") }
+        if let e = refreshError { lines.append("Подписка: \(e)") }
+        if let n = autoNotice { lines.append("Авто: \(n)") }
+        return lines.joined(separator: "\n")
+    }
 }
 
 extension TransportPreference {
     func matches(_ route: Route) -> Bool {
         switch self {
         case .auto: return true
-        case .reality: return route.transport == .reality
-        case .xhttp: return route.transport == .xhttp || route.transport == .cdn
-        case .hysteria2: return route.transport == .hysteria2
+        case .fast: return route.transport == .hysteria2
+        case .stable: return route.transport != .hysteria2
         }
     }
 }

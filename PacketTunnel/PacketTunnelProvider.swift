@@ -520,8 +520,8 @@ extension PacketTunnelProvider {
                 self.report.pingMS = result.1
                 let kind = Self.groupTitle(candidate.group)
                 let text = healthy
-                    ? "Сеть сменилась — переключились на «\(candidate.title)»\(kind)."
-                    : "Сервер «\(original.title ?? "—")» не отвечал — переключились на «\(candidate.title)»\(kind)."
+                    ? "Сеть сменилась — подключили «\(candidate.title)»\(kind)"
+                    : "«\(original.title ?? "Сервер")» перестал отвечать — подключили «\(candidate.title)»\(kind)"
                 self.post(text)
                 self.failedAt = nil
                 self.log.info("switched to \(candidate.id, privacy: .public)")
@@ -531,7 +531,7 @@ extension PacketTunnelProvider {
                 }
                 if !healthy {
                     self.failedAt = Date()
-                    self.post("Серверы не отвечают в этой сети. Попробуем снова, когда сеть изменится.")
+                    self.post("В этой сети серверы не отвечают — попробуем снова, когда сеть сменится")
                 }
             }
             self.reasserting = false
@@ -540,8 +540,8 @@ extension PacketTunnelProvider {
 
     private static func groupTitle(_ group: String) -> String {
         switch group {
-        case "bridge": return " (мост через РФ)"
-        case "reserve": return " (резервное подключение)"
+        case "bridge": return " (для мобильной сети)"
+        case "reserve": return " (резерв)"
         default: return ""
         }
     }

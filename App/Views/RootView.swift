@@ -3,6 +3,7 @@ import SwiftUI
 struct RootView: View {
     @Environment(AppModel.self) private var app
     @Environment(\.scenePhase) private var scenePhase
+    @AppStorage(SettingsKey.appearance) private var appearance: AppAppearance = .system
 
     var body: some View {
         @Bindable var app = app
@@ -16,16 +17,34 @@ struct RootView: View {
             }
         }
         .animation(.easeInOut(duration: 0.3), value: app.isLoggedIn)
+        .overlay(alignment: .top) {
+            if let toast = app.toast {
+                ToastView(toast: toast)
+                    .id(toast.id)
+                    .padding(.top, 2)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .onTapGesture { app.dismissToast() }
+                    .gesture(DragGesture(minimumDistance: 6).onEnded { value in
+                        if value.translation.height < 0 { app.dismissToast() }
+                    })
+            }
+        }
+        .animation(.spring(response: 0.45, dampingFraction: 0.72), value: app.toast)
         .sheet(isPresented: $app.showLogin, onDismiss: { app.cancelLogin() }) {
             TelegramLoginSheet()
         }
+        .onAppear { AppearanceController.apply(appearance) }
+        .onChange(of: appearance) { _, value in AppearanceController.apply(value) }
+        .onChange(of: app.power) { old, new in app.powerChanged(from: old, to: new) }
         .task {
             await app.start()
             if app.isDemo { await Self.markRendered() }
         }
         .onChange(of: scenePhase) { _, phase in
             switch phase {
-            case .active: Task { await app.becameActive() }
+            case .active:
+                AppearanceController.apply(appearance)
+                Task { await app.becameActive() }
             case .background: app.vpn.setForeground(false)
             default: break
             }
@@ -42,7 +61,7 @@ extension RootView {
     }
 }
 
-/// Системный таб-бар iOS (на iOS 26 — Liquid Glass), остальное — в стиле SecretClub.
+/// Две вкладки: Главная (кнопка ↔ сводка) и Настройки. Системный таб-бар (на iOS 26 — Liquid Glass).
 struct MainTabView: View {
     @Environment(AppModel.self) private var app
 
@@ -50,19 +69,13 @@ struct MainTabView: View {
         @Bindable var app = app
         TabView(selection: $app.selectedTab) {
             HomeView()
-                .tabItem { Label("Главная", systemImage: "house") }
+                .tabItem { Label("Главная", systemImage: "power") }
                 .tag(AppTab.home)
-            LocationsView()
-                .tabItem { Label("Локации", systemImage: "globe") }
-                .tag(AppTab.locations)
-            SubscriptionView()
-                .tabItem { Label("Подписка", systemImage: "creditcard") }
-                .tag(AppTab.subscription)
             SettingsView()
-                .tabItem { Label("Настройки", systemImage: "gearshape") }
+                .tabItem { Label("Настройки", systemImage: "gearshape.fill") }
                 .tag(AppTab.settings)
         }
-        .tint(Theme.tint)
+        .tint(Theme.ink)
         .sensoryFeedback(.selection, trigger: app.selectedTab)
     }
 }

@@ -7,8 +7,8 @@ options:
   createIntermediateGroups: true
 settings:
   base:
-    MARKETING_VERSION: "0.5.0"
-    CURRENT_PROJECT_VERSION: "5"
+    MARKETING_VERSION: "0.6.0"
+    CURRENT_PROJECT_VERSION: "6"
     SWIFT_VERSION: "5.0"
     IPHONEOS_DEPLOYMENT_TARGET: "17.0"
     TARGETED_DEVICE_FAMILY: "1"
@@ -47,8 +47,6 @@ targets:
           UIApplicationSupportsMultipleScenes: false
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         NSCameraUsageDescription: Камера нужна, чтобы отсканировать QR-код подписки.
-        UIAppFonts: [Onest-Regular.ttf, Onest-Medium.ttf, Onest-SemiBold.ttf, Onest-Bold.ttf]
-        UIUserInterfaceStyle: Dark
         LSApplicationQueriesSchemes: [tg]
         CFBundleURLTypes:
           - CFBundleURLName: com.secretclub.app

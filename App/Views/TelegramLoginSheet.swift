@@ -141,7 +141,7 @@ private struct StepRow: View {
     var body: some View {
         HStack(spacing: 12) {
             Text("\(number)")
-                .font(.onest(14, .bold, relativeTo: .footnote))
+                .font(.sc(14, .bold, relativeTo: .footnote))
                 .foregroundStyle(Theme.onTint)
                 .frame(width: 26, height: 26)
                 .background(Theme.tint, in: Circle())

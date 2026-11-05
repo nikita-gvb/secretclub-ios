@@ -6,23 +6,31 @@ enum RouteGroup: String, CaseIterable, Identifiable, Codable {
 
     var title: String {
         switch self {
-        case .regular: return "Обычные"
-        case .bridge: return "Мост через РФ"
+        case .regular: return "Серверы"
+        case .bridge: return "Для мобильной сети"
         case .reserve: return "Резервное подключение"
         }
     }
     var shortTitle: String {
         switch self {
-        case .regular: return "Прямое"
-        case .bridge: return "Мост РФ"
+        case .regular: return "Обычный"
+        case .bridge: return "Для мобильной сети"
         case .reserve: return "Резерв"
         }
     }
     var subtitle: String {
         switch self {
-        case .regular: return "Прямое подключение — максимальная скорость"
-        case .bridge: return "Через сервер в России, если зарубежные адреса режут"
-        case .reserve: return "Работает, когда остальное недоступно. Трафик ограничен, поэтому «Авто» включает его только в крайнем случае."
+        case .regular: return "Самые быстрые — для обычного интернета."
+        case .bridge: return "Работают, даже когда мобильный интернет пускает только на российские сайты."
+        case .reserve: return "Включается само, если остальные серверы недоступны. Трафик ограничен — тратится, только пока работает."
+        }
+    }
+    /// Что пишем под кнопкой, пока «Авто» перебирает группу.
+    var searchPhase: String {
+        switch self {
+        case .regular: return "Выбираем самый быстрый сервер"
+        case .bridge: return "Пробуем серверы для мобильной сети"
+        case .reserve: return "Пробуем резервное подключение"
         }
     }
     var icon: String {
@@ -52,6 +60,33 @@ struct Route: Identifiable, Hashable {
     var unavailable: Bool = false
 
     var flag: String { emoji }
+
+    /// Качество связи 0…4 по последнему замеру: 0 — недоступен, nil — ещё не мерили.
+    var quality: Int? {
+        if unavailable { return 0 }
+        return ping.map(Self.quality(ms:))
+    }
+
+    static func quality(ms: Int) -> Int {
+        switch ms {
+        case ..<250: return 4
+        case ..<500: return 3
+        case ..<900: return 2
+        default: return 1
+        }
+    }
+
+    /// Подпись без технических слов: «Быстрый · 5 Гбит/с», «для мобильной сети», «резерв».
+    var humanDetail: String {
+        var parts: [String] = []
+        switch group {
+        case .regular: parts.append(transport == .hysteria2 ? "Быстрый" : "Устойчивый")
+        case .bridge: parts.append("для мобильной сети")
+        case .reserve: parts.append("резерв")
+        }
+        if let r = detail.range(of: #"\d+ Гбит/с"#, options: .regularExpression) { parts.append(String(detail[r])) }
+        return parts.joined(separator: " · ")
+    }
     /// Подпись для карточки подключения: «Hysteria2», «через CDN» и т. п.
     var shortDetail: String {
         switch group {
@@ -115,6 +150,13 @@ enum NetworkMode: String {
         case .whitelist: return "exclamationmark.shield.fill"
         case .offline: return "wifi.slash"
         }
+    }
+}
+
+enum Quality {
+    static func word(_ q: Int?) -> String {
+        guard let q else { return "—" }
+        return ["Нет связи", "Слабая", "Средняя", "Хорошая", "Отличная"][max(0, min(4, q))]
     }
 }
 

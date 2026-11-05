@@ -5,18 +5,11 @@ struct ConsentCard: View {
     @Environment(AppModel.self) private var app
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .top, spacing: 12) {
-                CellIcon(systemName: "doc.text", color: Theme.tint, size: 36)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Примите условия сервиса").font(.scHeadline).foregroundStyle(Theme.label)
-                    Text("Один раз — после этого подписки появятся в приложении.")
-                        .font(.scSub)
-                        .foregroundStyle(Theme.label2)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Spacer(minLength: 0)
-            }
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Один раз примите условия сервиса — после этого серверы появятся сами.")
+                .font(.scSub)
+                .foregroundStyle(Theme.label2)
+                .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 18) {
                 if let terms = app.account?.termsURL {
                     Link(destination: terms) { Label("Условия", systemImage: "arrow.up.right") }
@@ -25,20 +18,20 @@ struct ConsentCard: View {
                     Link(destination: privacy) { Label("Конфиденциальность", systemImage: "arrow.up.right") }
                 }
             }
-            .font(.scSub)
+            .font(.sc(15, .medium, relativeTo: .subheadline))
+            .foregroundStyle(Theme.ink)
             .labelStyle(TrailingIconLabelStyle())
             Button {
                 Task { await app.acceptConsent() }
             } label: {
-                HStack(spacing: 8) {
-                    if app.busyAction == "consent" { ProgressView().tint(Theme.onTint) }
-                    Text("Принимаю")
-                }
+                LoadingLabel(title: "Принимаю", loading: app.busyAction == "consent")
             }
             .buttonStyle(.scPrimary)
             .disabled(app.busyAction != nil)
         }
-        .heroCard()
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.cell, in: RoundedRectangle(cornerRadius: Theme.rCard, style: .continuous))
     }
 }
 
@@ -48,50 +41,34 @@ struct NoSubscriptionCard: View {
     @Environment(\.openURL) private var openURL
 
     var body: some View {
-        let account = app.account
-        let trial = account?.trialAvailable == true
-        let days = account?.trialDays ?? 7
-        return VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                StatusPill(text: "Нет подписки", color: Theme.gray)
-                Spacer()
-                if let account { Text(account.displayName).font(.scFoot).foregroundStyle(Theme.label2).lineLimit(1) }
-            }
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Подписки пока нет").font(.scTitle2).foregroundStyle(Theme.label)
-                Text(trial ? "Попробуйте бесплатно: \(days) \(Format.plural(days, "день", "дня", "дней")). Серверы появятся сразу."
-                           : "Оформите подписку в боте — после оплаты всё появится здесь само.")
-                    .font(.scSub)
-                    .foregroundStyle(Theme.label2)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+        let trial = app.account?.trialAvailable == true
+        let days = app.account?.trialDays ?? 7
+        VStack(alignment: .leading, spacing: 10) {
+            Text(trial ? "Бесплатно \(Format.days(days)) — серверы появятся сразу, без оплаты."
+                       : "Оформите подписку в боте — после оплаты всё появится здесь само.")
+                .font(.scSub)
+                .foregroundStyle(Theme.label2)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.bottom, 2)
             if trial {
                 Button {
                     Task { await app.startTrial() }
                 } label: {
-                    HStack(spacing: 8) {
-                        if app.busyAction == "trial" { ProgressView().tint(Theme.onTint) }
-                        Text("Попробовать бесплатно")
-                    }
+                    LoadingLabel(title: "Попробовать бесплатно", loading: app.busyAction == "trial")
                 }
                 .buttonStyle(.scPrimary)
                 .disabled(app.busyAction != nil)
                 Button("Тарифы в боте") { openURL(Config.botLink(start: "buy")) }
                     .buttonStyle(.scSecondary)
             } else {
-                Button("Оформить в боте") { openURL(Config.botLink(start: "buy")) }
-                    .buttonStyle(.scPrimary)
+                Button { openURL(Config.botLink(start: "buy")) } label: {
+                    Label("Оформить в Telegram", systemImage: "paperplane.fill")
+                }
+                .buttonStyle(.scPrimary)
             }
         }
-        .heroCard()
-    }
-}
-
-struct TrailingIconLabelStyle: LabelStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        HStack(spacing: 4) {
-            configuration.title
-            configuration.icon.font(.system(size: 11, weight: .semibold))
-        }
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.cell, in: RoundedRectangle(cornerRadius: Theme.rCard, style: .continuous))
     }
 }

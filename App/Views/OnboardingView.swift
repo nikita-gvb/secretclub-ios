@@ -56,8 +56,8 @@ struct OnboardingView: View {
                 .background {
                     RoundedRectangle(cornerRadius: 32, style: .continuous)
                         .fill(.ultraThinMaterial)
-                        .overlay(RoundedRectangle(cornerRadius: 32, style: .continuous).fill(Color(hex: 0x18181D, opacity: 0.7)))
-                        .overlay(RoundedRectangle(cornerRadius: 32, style: .continuous).strokeBorder(Color.white.opacity(0.14), lineWidth: 0.5))
+                        .overlay(RoundedRectangle(cornerRadius: 32, style: .continuous).fill(Theme.cell.opacity(0.7)))
+                        .overlay(RoundedRectangle(cornerRadius: 32, style: .continuous).strokeBorder(Theme.border, lineWidth: 0.5))
                 }
             }
             .padding(.horizontal, 12)

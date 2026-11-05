@@ -51,3 +51,26 @@ extension Format {
         return "\(hours / 24) дн назад"
     }
 }
+
+extension Format {
+    /// Скорость: «4,2» + «МБ/с» (меньше 0,1 МБ/с — в КБ/с).
+    static func speedParts(_ bytesPerSecond: Double) -> (number: String, unit: String) {
+        let mb = bytesPerSecond / 1_048_576
+        if mb >= 0.1 { return (String(format: "%.1f", mb).replacingOccurrences(of: ".", with: ","), "МБ/с") }
+        return ("\(Int((bytesPerSecond / 1024).rounded()))", "КБ/с")
+    }
+
+    static func speed(_ bytesPerSecond: Double) -> String {
+        let p = speedParts(bytesPerSecond)
+        return "\(p.number) \(p.unit)"
+    }
+
+    /// Объём: «2,4» + «ГБ».
+    static func bytesParts(_ b: Int64) -> (number: String, unit: String) {
+        let parts = bytes(b).split(separator: " ", maxSplits: 1).map(String.init)
+        return (parts.first ?? "0", parts.count > 1 ? parts[1] : "")
+    }
+
+    /// «24 дня».
+    static func days(_ n: Int) -> String { "\(n) \(plural(n, "день", "дня", "дней"))" }
+}

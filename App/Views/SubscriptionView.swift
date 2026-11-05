@@ -1,123 +1,144 @@
 import SwiftUI
 
-struct SubscriptionView: View {
+// MARK: - Подписка
+
+struct SubscriptionScreen: View {
     @Environment(AppModel.self) private var app
     @Environment(\.openURL) private var openURL
-    @State private var unlinkTarget: UnlinkTarget?
     @State private var showReserveLink = false
-
-    struct UnlinkTarget: Identifiable {
-        let device: Device
-        let reserve: Bool
-        var id: String { (reserve ? "r|" : "") + device.id }
-    }
+    @State private var shownDays = 0.0
 
     var body: some View {
-        PageScroll {
-            PageHeader(title: "Подписка") {
-                if app.isRefreshing {
-                    ProgressView().tint(Theme.tint).frame(width: 40, height: 40)
-                        .alignmentGuide(.lastTextBaseline) { d in d[.bottom] - 8 }
-                }
-            }
+        List {
             if app.needsConsent {
-                ConsentCard()
+                cardSection { ConsentCard() }
             } else if app.needsSubscription {
-                NoSubscriptionCard()
+                cardSection { NoSubscriptionCard() }
             } else {
-                hero
+                Section { hero }
+                    .listRowInsets(EdgeInsets(top: 20, leading: 20, bottom: 20, trailing: 20))
             }
+
             if let error = app.accountError ?? app.refreshError {
-                NoticeCard(text: error, icon: "exclamationmark.triangle.fill", color: Theme.orange)
-            }
-            if !app.needsConsent {
-                reserveSection
-                devicesSection(app.subscription, header: "Устройства", reserve: false)
-            }
-            SCSection(footer: "Продление и оплата — в Telegram-боте. После оплаты данные обновятся сами.") {
-                Button { openURL(Config.botURL) } label: {
-                    SCRow(title: "Открыть бота", chevron: true) { CellIcon(systemName: "paperplane") }
+                Section {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .font(.scSub)
+                        .foregroundStyle(Theme.orange)
                 }
-                .buttonStyle(RowButtonStyle())
-                SCDivider()
-                Button { openURL(Config.supportURL) } label: {
-                    SCRow(title: "Поддержка", chevron: true) { CellIcon(systemName: "questionmark.bubble") }
-                }
-                .buttonStyle(RowButtonStyle())
             }
-        }
-        .refreshable { await app.refreshSubscription() }
-        .confirmationDialog("Отвязать устройство?",
-                            isPresented: Binding(get: { unlinkTarget != nil }, set: { if !$0 { unlinkTarget = nil } }),
-                            titleVisibility: .visible, presenting: unlinkTarget) { target in
-            Button("Отвязать", role: .destructive) {
-                Task { await app.unlink(target.device, reserve: target.reserve) }
-            }
-            Button("Отмена", role: .cancel) {}
-        } message: { target in
-            Text("«\(target.device.name)» пропадёт из списка и освободит место для другого устройства.")
-        }
-        .sheet(isPresented: $showReserveLink) { PasteLinkSheet(reserve: true) }
-    }
 
-    // MARK: - Основная подписка
+            if !app.needsConsent { reserveSection }
 
-    private var hero: some View {
-        let sub = app.subscription
-        return VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                StatusPill(text: sub.status.title, color: sub.status.color)
-                Spacer()
-                Text(sub.plan).font(.scFoot).foregroundStyle(Theme.label2).lineLimit(1)
-            }
-            HStack(alignment: .center, spacing: 16) {
-                VStack(alignment: .leading, spacing: 4) {
-                    if !sub.isActive {
-                        Text(inactiveTitle(sub)).font(.scTitle1).foregroundStyle(Theme.label)
-                        Text("Продлите в боте — VPN включится сам").font(.scSub).foregroundStyle(Theme.label2)
-                    } else if let days = sub.daysLeft, let expires = sub.expiresAt {
-                        HStack(alignment: .firstTextBaseline, spacing: 8) {
-                            HeroNumber(text: "\(days)")
-                            Text(Format.plural(days, "день", "дня", "дней"))
-                                .font(.scTitle3)
-                                .foregroundStyle(Theme.label2)
-                        }
-                        Text("до \(Format.date(expires))").font(.scSub).foregroundStyle(Theme.label2)
-                    } else {
-                        Text("Бессрочно").font(.scTitle1).foregroundStyle(Theme.label)
-                        Text("Срок подписки не ограничен").font(.scSub).foregroundStyle(Theme.label2)
+            if !app.subscription.devices.isEmpty {
+                Section {
+                    NavigationLink(value: SettingsRoute.devices) {
+                        SettingsRow(icon: "iphone", color: Theme.blue, title: "Устройства", value: devicesValue)
                     }
                 }
-                Spacer(minLength: 0)
-                HeroBadge(systemName: sub.isActive ? "checkmark.shield" : "xmark.shield", color: sub.isActive ? Theme.green : Theme.red)
             }
-            HStack(spacing: 8) {
-                StatTile(label: "Трафик",
-                         value: sub.leftBytes.map(Format.bytes) ?? "Безлимит",
-                         hint: sub.limitBytes.map { "из \(Format.bytes($0))" } ?? "использовано \(Format.bytes(sub.usedBytes))",
-                         progress: sub.trafficProgress)
-                if let limit = sub.deviceLimit {
-                    let used = sub.devices.count
-                    let free = max(0, limit - used)
-                    StatTile(label: "Устройства", value: "\(used) из \(limit)", hint: free > 0 ? "свободно \(free)" : "мест нет")
-                } else {
-                    StatTile(label: "Серверов", value: "\(app.routes.filter { $0.group != .reserve }.count)", hint: updatedText)
+
+            Section {
+                Link(destination: Config.botURL) {
+                    SettingsRow(icon: "paperplane.fill", color: Theme.telegram, title: "Открыть бота", external: true)
                 }
+                Link(destination: Config.supportURL) {
+                    SettingsRow(icon: "questionmark.bubble.fill", color: Theme.gray, title: "Поддержка", external: true)
+                }
+            } footer: {
+                Text("Продление и оплата — в Telegram-боте. После оплаты всё обновится само.")
             }
-            HStack(spacing: 10) {
-                Button("Продлить") { openURL(Config.botLink(start: "buy")) }
-                    .buttonStyle(.scPrimary)
+        }
+        .listStyle(.insetGrouped)
+        .navigationTitle("Подписка")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
                 if app.isRefreshing {
-                    ProgressView().tint(Theme.tint).frame(width: 50, height: 50)
+                    ProgressView()
                 } else {
-                    RoundIconButton(systemName: "arrow.clockwise") {
-                        Task { await app.refreshSubscription() }
+                    Button { Task { await app.refreshSubscription() } } label: {
+                        Image(systemName: "arrow.clockwise")
                     }
                     .accessibilityLabel("Обновить")
                 }
             }
         }
-        .heroCard()
+        .refreshable { await app.refreshSubscription() }
+        .redacted(reason: isSkeleton ? .placeholder : [])
+        .sheet(isPresented: $showReserveLink) { PasteLinkSheet(reserve: true) }
+        .onAppear { countUp() }
+        .onChange(of: app.subscription.daysLeft) { countUp() }
+        .task {
+            guard !app.isDemo, app.hasSession else { return }
+            if (app.meta?.updatedAt ?? .distantPast) < Date().addingTimeInterval(-120) {
+                await app.refreshSubscription()
+            }
+        }
+    }
+
+    private var isSkeleton: Bool {
+        app.isRefreshing && app.meta == nil && !app.subscription.fromAccount
+    }
+
+    private func countUp() {
+        let target = Double(app.subscription.isActive ? (app.subscription.daysLeft ?? 0) : 0)
+        guard target != shownDays else { return }
+        withAnimation(.smooth(duration: 0.7).delay(0.15)) { shownDays = target }
+    }
+
+    @ViewBuilder
+    private func cardSection<C: View>(@ViewBuilder _ content: () -> C) -> some View {
+        Section { content() }
+            .listRowInsets(EdgeInsets())
+            .listRowBackground(Color.clear)
+    }
+
+    // MARK: Главная карточка
+
+    private var hero: some View {
+        let sub = app.subscription
+        return VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                StatusPill(text: sub.status.title, color: sub.status.color)
+                Spacer(minLength: 8)
+                Text(sub.plan).font(.scFoot).foregroundStyle(Theme.label2).lineLimit(1)
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                if !sub.isActive {
+                    Text(inactiveTitle(sub))
+                        .font(.sc(30, .bold, design: .rounded, relativeTo: .title))
+                        .foregroundStyle(Theme.label)
+                    Text("Продлите в Telegram — VPN включится сам")
+                        .font(.scSub).foregroundStyle(Theme.label2)
+                } else if sub.daysLeft != nil {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        CountingText(value: shownDays)
+                            .font(.sc(56, .bold, design: .rounded, relativeTo: .largeTitle))
+                            .foregroundStyle(Theme.label)
+                        Text(Format.plural(Int(shownDays.rounded()), "день", "дня", "дней"))
+                            .font(.sc(22, .semibold, relativeTo: .title2))
+                            .foregroundStyle(Theme.label2)
+                    }
+                    Text(tillText(sub)).font(.scSub).foregroundStyle(Theme.label2)
+                } else {
+                    Text("Бессрочно")
+                        .font(.sc(30, .bold, design: .rounded, relativeTo: .title))
+                        .foregroundStyle(Theme.label)
+                    Text(trafficText(sub)).font(.scSub).foregroundStyle(Theme.label2)
+                }
+            }
+            ProgressBar(value: sub.isActive ? sub.progress : 0, color: sub.isActive ? Theme.tint : Theme.red)
+                .padding(.vertical, 2)
+            Button { openURL(Config.botLink(start: "buy")) } label: {
+                Label("Продлить в Telegram", systemImage: "paperplane.fill")
+            }
+            .buttonStyle(.scPrimary)
+            .padding(.top, 4)
+            Text(updatedText)
+                .font(.scCaption)
+                .foregroundStyle(Theme.label3)
+                .frame(maxWidth: .infinity)
+        }
     }
 
     private func inactiveTitle(_ sub: SubscriptionInfo) -> String {
@@ -128,139 +149,229 @@ struct SubscriptionView: View {
         }
     }
 
-    private var updatedText: String {
-        guard let date = app.meta?.updatedAt else { return "не обновлялась" }
-        return "обновлено \(Format.ago(date))"
+    private func tillText(_ sub: SubscriptionInfo) -> String {
+        var parts: [String] = []
+        if let expires = sub.expiresAt { parts.append("до \(Format.date(expires))") }
+        parts.append(trafficText(sub))
+        return parts.joined(separator: " · ")
     }
 
-    // MARK: - Резервное подключение
+    private func trafficText(_ sub: SubscriptionInfo) -> String {
+        if let left = sub.leftBytes { return "осталось \(Format.bytes(left))" }
+        return "безлимитный трафик"
+    }
 
-    private let reserveFooter = "Выручит, когда обычные серверы недоступны. Трафик ограничен, поэтому «Авто» включает его только в крайнем случае."
+    private var updatedText: String {
+        guard let date = app.meta?.updatedAt else { return "Обновляется само" }
+        return "Обновлено \(Format.ago(date))"
+    }
+
+    private var devicesValue: String {
+        let n = app.subscription.devices.count
+        return app.subscription.deviceLimit.map { "\(n) из \($0)" } ?? "\(n)"
+    }
+
+    // MARK: Резерв
+
+    private let reserveFooter = "Включается само, если обычные серверы недоступны. Тратится, только пока работает."
 
     @ViewBuilder private var reserveSection: some View {
         if let reserve = app.reserve {
-            SCSection(header: "Резервное подключение", footer: reserveFooter) {
-                ReserveSummary(info: reserve)
-                SCDivider()
+            Section {
+                ReserveRow(info: reserve)
                 Button { openURL(Config.botLink(start: "traffic")) } label: {
-                    SCRow(title: "Докупить трафик", chevron: true) { CellIcon(systemName: "plus") }
+                    SettingsRow(icon: "plus", color: Theme.blue, title: "Докупить трафик", external: true)
                 }
-                .buttonStyle(RowButtonStyle())
+                .foregroundStyle(Theme.label)
+            } header: {
+                Text("Резервное подключение")
+            } footer: {
+                Text(reserveFooter)
             }
         } else if let account = app.account, account.consentAccepted {
-            SCSection(header: "Резервное подключение", footer: reserveFooter) {
+            Section {
                 Button {
-                    Task { await app.createReserve() }
-                } label: {
-                    SCRow(title: "Подключить бесплатно", subtitle: "\(account.freeReserveMB) МБ в подарок") {
-                        CellIcon(systemName: "gift", color: Theme.tint)
-                    } trailing: {
-                        if app.busyAction == "reserve" { ProgressView() }
+                    Task {
+                        await app.createReserve()
+                        if app.reserve != nil {
+                            app.showToast("Резерв подключён — \(account.freeReserveMB) МБ в подарок", icon: "gift.fill", tone: .good)
+                        }
                     }
+                } label: {
+                    SettingsRow(icon: "gift.fill", color: Theme.green,
+                                title: "Получить \(account.freeReserveMB) МБ бесплатно",
+                                loading: app.busyAction == "reserve")
                 }
-                .buttonStyle(RowButtonStyle())
                 .disabled(app.busyAction != nil)
+            } header: {
+                Text("Резервное подключение")
+            } footer: {
+                Text(reserveFooter)
             }
         } else if !app.hasSession {
-            SCSection(header: "Резервное подключение",
-                      footer: "Ссылку резервного подключения можно взять в боте. Или войдите через Telegram — она подтянется сама.") {
+            Section {
                 Button { showReserveLink = true } label: {
-                    SCRow(title: "Добавить ссылку", chevron: true) { CellIcon(systemName: "link") }
+                    SettingsRow(icon: "link", color: Theme.gray, title: "Добавить ссылку")
                 }
-                .buttonStyle(RowButtonStyle())
+            } header: {
+                Text("Резервное подключение")
+            } footer: {
+                Text("Ссылку можно взять в боте. Или войдите через Telegram — резерв подтянется сам.")
+            }
+        }
+    }
+}
+
+/// Остаток трафика резервного подключения.
+private struct ReserveRow: View {
+    let info: SubscriptionInfo
+
+    var body: some View {
+        HStack(spacing: 14) {
+            Image(systemName: "lifepreserver")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(info.status.isUsable ? Theme.ink : Theme.red)
+                .frame(width: 30, height: 30)
+                .background(info.status.isUsable ? Theme.tintSoft : Theme.red.opacity(0.14),
+                            in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(title).font(.sc(17, .semibold, relativeTo: .body)).monospacedDigit()
+                    Spacer(minLength: 8)
+                    if let limit = info.limitBytes {
+                        Text("из \(Format.bytes(limit))").font(.scFoot).foregroundStyle(Theme.label2).monospacedDigit()
+                    }
+                }
+                if let progress = info.trafficProgress {
+                    ProgressBar(value: 1 - progress, color: info.status.isUsable ? Theme.tint : Theme.red)
+                }
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private var title: String {
+        if !info.status.isUsable { return info.status.title }
+        if let left = info.leftBytes { return "\(Format.bytes(left)) осталось" }
+        return "Подключено · \(Format.bytes(info.usedBytes))"
+    }
+}
+
+/// Число, которое «досчитывает» до значения при анимации.
+struct CountingText: View, Animatable {
+    var value: Double
+    var animatableData: Double {
+        get { value }
+        set { value = newValue }
+    }
+    var body: some View {
+        Text("\(Int(value.rounded()))").monospacedDigit()
+    }
+}
+
+// MARK: - Устройства
+
+struct DevicesScreen: View {
+    @Environment(AppModel.self) private var app
+    @State private var target: UnlinkTarget?
+    @State private var unlinked = 0
+
+    struct UnlinkTarget: Identifiable {
+        let device: Device
+        let reserve: Bool
+        var id: String { (reserve ? "r|" : "") + device.id }
+    }
+
+    var body: some View {
+        List {
+            deviceSection(app.subscription, reserve: false)
+            if let reserve = app.reserve, reserve.fromAccount, reserve.devices.contains(where: { !$0.isCurrent }) {
+                deviceSection(reserve, reserve: true)
+            }
+        }
+        .listStyle(.insetGrouped)
+        .navigationTitle("Устройства")
+        .navigationBarTitleDisplayMode(.inline)
+        .refreshable { await app.refreshSubscription() }
+        .sensoryFeedback(.success, trigger: unlinked)
+        .confirmationDialog("Отвязать устройство?",
+                            isPresented: Binding(get: { target != nil }, set: { if !$0 { target = nil } }),
+                            titleVisibility: .visible, presenting: target) { target in
+            Button("Отвязать", role: .destructive) { unlink(target) }
+            Button("Отмена", role: .cancel) {}
+        } message: { target in
+            Text("На «\(target.device.name)» VPN выключится, а место освободится для другого устройства.")
+        }
+    }
+
+    private func unlink(_ target: UnlinkTarget) {
+        Task {
+            await app.unlink(target.device, reserve: target.reserve)
+            let list = target.reserve ? (app.reserve?.devices ?? []) : app.subscription.devices
+            if app.accountError == nil, !list.contains(where: { $0.id == target.device.id }) {
+                unlinked += 1
+                app.showToast("\(target.device.name) отвязан — место освободилось", icon: "checkmark", tone: .good)
             }
         }
     }
 
-    // MARK: - Устройства
-
     @ViewBuilder
-    private func devicesSection(_ sub: SubscriptionInfo, header: String, reserve: Bool) -> some View {
+    private func deviceSection(_ sub: SubscriptionInfo, reserve: Bool) -> some View {
         let devices = sub.devices.sorted { $0.isCurrent && !$1.isCurrent }
-        if !devices.isEmpty {
-            let title = sub.deviceLimit.map { "\(header) · \(devices.count) из \($0)" } ?? header
-            SCSection(header: title,
-                      footer: sub.fromAccount ? "Отвязанное устройство освободит место для нового." : "Войдите через Telegram, чтобы видеть и отвязывать устройства.") {
-                ForEach(Array(devices.enumerated()), id: \.element.id) { index, device in
-                    if index > 0 { SCDivider() }
-                    SCRow(title: device.name, subtitle: subtitle(device)) {
-                        CellIcon(systemName: device.icon)
-                    } trailing: {
-                        if device.isCurrent {
-                            Text("Это устройство").font(.scFoot).foregroundStyle(Theme.tint)
-                        } else if sub.fromAccount {
-                            if app.busyAction == "device:\(device.id)" {
-                                ProgressView()
-                            } else {
-                                Button("Отвязать") { unlinkTarget = UnlinkTarget(device: device, reserve: reserve) }
-                                    .buttonStyle(.sc(.secondary, small: true))
-                                    .fixedSize()
-                                    .disabled(app.busyAction != nil)
-                            }
-                        }
-                    }
+        Section {
+            ForEach(devices) { device in
+                row(device, canUnlink: sub.fromAccount && !device.isCurrent, reserve: reserve)
+            }
+        } header: {
+            if reserve { Text("Резервное подключение") }
+        } footer: {
+            Text(footer(sub))
+        }
+    }
+
+    private func row(_ device: Device, canUnlink: Bool, reserve: Bool) -> some View {
+        HStack(spacing: 14) {
+            SquareIcon(systemName: device.icon, color: device.isCurrent ? Theme.blue : Theme.gray)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(device.name).foregroundStyle(Theme.label)
+                if let sub = subtitle(device) {
+                    Text(sub).font(.scFoot).foregroundStyle(Theme.label2)
                 }
+            }
+            .lineLimit(1)
+            Spacer(minLength: 8)
+            if device.isCurrent {
+                Chip(text: "вы здесь")
+            } else if canUnlink {
+                if app.busyAction == "device:\(device.id)" {
+                    ProgressView()
+                } else {
+                    Button("Отвязать") { target = UnlinkTarget(device: device, reserve: reserve) }
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(Theme.red)
+                        .disabled(app.busyAction != nil)
+                }
+            }
+        }
+        .padding(.vertical, 2)
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            if canUnlink {
+                Button("Отвязать", role: .destructive) { target = UnlinkTarget(device: device, reserve: reserve) }
             }
         }
     }
 
     private func subtitle(_ device: Device) -> String? {
+        if device.isCurrent { return "Это устройство" }
         var parts: [String] = []
+        if let seen = device.lastSeen { parts.append(Format.lastSeen(seen)) }
         if let detail = device.detail { parts.append(detail) }
-        if !device.isCurrent, let seen = device.lastSeen { parts.append(Format.lastSeen(seen)) }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
-}
 
-/// Остаток трафика резервного подключения.
-struct ReserveSummary: View {
-    let info: SubscriptionInfo
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 12) {
-                CellIcon(systemName: "lifepreserver", color: info.status.isUsable ? Theme.tint : Theme.red)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(info.status.isUsable ? "Подключено" : info.status.title)
-                        .font(.scBody).foregroundStyle(Theme.label)
-                    Text(detail).font(.scFoot).foregroundStyle(Theme.label2)
-                }
-                Spacer(minLength: 8)
-                if let left = info.leftBytes {
-                    VStack(alignment: .trailing, spacing: 1) {
-                        Text(Format.bytes(left)).font(.onest(17, .semibold, relativeTo: .body)).foregroundStyle(Theme.label).monospacedDigit()
-                        Text("осталось").font(.scFoot).foregroundStyle(Theme.label3)
-                    }
-                }
-            }
-            if let progress = info.trafficProgress {
-                GeometryReader { geo in
-                    ZStack(alignment: .leading) {
-                        Capsule().fill(Color.white.opacity(0.1))
-                        Capsule().fill(info.status.isUsable ? Theme.tint : Theme.red)
-                            .frame(width: geo.size.width * min(1, max(0, 1 - progress)))
-                    }
-                }
-                .frame(height: 5)
-                .padding(.leading, 42)
-            }
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-    }
-
-    private var detail: String {
-        if let limit = info.limitBytes { return "использовано \(Format.bytes(info.usedBytes)) из \(Format.bytes(limit))" }
-        return "использовано \(Format.bytes(info.usedBytes))"
-    }
-}
-
-extension SubscriptionStatus {
-    var color: Color {
-        switch self {
-        case .active: return Theme.green
-        case .expiring: return Theme.orange
-        case .expired, .limited, .disabled: return Theme.red
-        }
+    private func footer(_ sub: SubscriptionInfo) -> String {
+        guard sub.fromAccount else { return "Войдите через Telegram, чтобы видеть и отвязывать устройства." }
+        let limit = sub.deviceLimit.map { "Можно подключить до \($0) \(Format.plural($0, "устройства", "устройств", "устройств")). " } ?? ""
+        return limit + "Отвязанное освободит место — на нём VPN выключится."
     }
 }

@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 enum Config {
     /// Бот SecretClub. Бэкенд может прислать другой username — тогда берём его.
@@ -41,17 +42,47 @@ enum SettingsKey {
     static let autoMode = "autoMode"
     static let selectedRoute = "selectedRoute"
     static let connectedRoute = "connectedRoute"
+    static let appearance = "appearance"
 }
 
+/// Оформление: как в системе (по умолчанию), светлое или тёмное.
+enum AppAppearance: String, CaseIterable, Identifiable {
+    case system, light, dark
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .system: return "Как в системе"
+        case .light: return "Светлое"
+        case .dark: return "Тёмное"
+        }
+    }
+    var style: UIUserInterfaceStyle {
+        switch self {
+        case .system: return .unspecified
+        case .light: return .light
+        case .dark: return .dark
+        }
+    }
+}
+
+/// «Способ подключения» без технических слов. Raw-значения совместимы с 0.5 (hysteria2/reality).
 enum TransportPreference: String, CaseIterable, Identifiable {
-    case auto, reality, xhttp, hysteria2
+    case auto
+    case fast = "hysteria2"
+    case stable = "reality"
     var id: String { rawValue }
     var title: String {
         switch self {
         case .auto: return "Авто"
-        case .reality: return "Reality"
-        case .xhttp: return "XHTTP"
-        case .hysteria2: return "Hysteria2"
+        case .fast: return "Быстрый"
+        case .stable: return "Устойчивый"
+        }
+    }
+    var subtitle: String {
+        switch self {
+        case .auto: return "Подберём сами — рекомендуем"
+        case .fast: return "Для видео и игр"
+        case .stable: return "Если связь часто обрывается"
         }
     }
 }

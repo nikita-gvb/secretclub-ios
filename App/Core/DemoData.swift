@@ -11,15 +11,15 @@ enum DemoData {
     static let routes: [Route] = [
         r("fi-hy", "🇫🇮", "Финляндия", .regular, .hysteria2, "Hysteria2", "Hysteria2 · 5 Гбит/с", 38),
         r("se-hy", "🇸🇪", "Швеция", .regular, .hysteria2, "Hysteria2", "Hysteria2 · 100 Гбит/с", 46),
-        r("pl-hy", "🇵🇱", "Польша", .regular, .hysteria2, "Hysteria2", "Hysteria2 · 1 Гбит/с", 54),
-        r("de-hy", "🇩🇪", "Германия 2", .regular, .hysteria2, "Hysteria2", "Hysteria2 · 1 Гбит/с", 61),
+        r("pl-hy", "🇵🇱", "Польша", .regular, .hysteria2, "Hysteria2", "Hysteria2 · 1 Гбит/с", 310),
+        r("de-hy", "🇩🇪", "Германия 2", .regular, .hysteria2, "Hysteria2", "Hysteria2 · 1 Гбит/с", 560),
         r("ua", "🇺🇦", "Украина", .regular, .reality, "Reality", "Reality", nil),
         r("fi-x", "🇫🇮", "Финляндия", .bridge, .xhttp, "XHTTP", "через Россию · XHTTP · 5 Гбит/с", 69),
-        r("fi-tcp", "🇫🇮", "Финляндия", .bridge, .reality, "Reality", "через Россию · Reality · 5 Гбит/с", 71),
-        r("pl-x", "🇵🇱", "Польша", .bridge, .xhttp, "XHTTP", "через Россию · XHTTP · 1 Гбит/с", 77),
+        r("fi-tcp", "🇫🇮", "Финляндия", .bridge, .reality, "Reality", "через Россию · Reality · 5 Гбит/с", 290),
+        r("pl-x", "🇵🇱", "Польша", .bridge, .xhttp, "XHTTP", "через Россию · XHTTP · 1 Гбит/с", 470),
         r("r|fi-cdn", "🇫🇮", "Финляндия", .reserve, .cdn, "XHTTP", "через CDN · TF-2", 96),
-        r("se-cdn", "🇸🇪", "Швеция", .reserve, .cdn, "XHTTP", "через CDN · TF-2", 104),
-        r("de-cdn", "🇩🇪", "Германия", .reserve, .cdn, "XHTTP", "через CDN · TF-2", 118),
+        r("se-cdn", "🇸🇪", "Швеция", .reserve, .cdn, "XHTTP", "через CDN · TF-2", 380),
+        r("de-cdn", "🇩🇪", "Германия", .reserve, .cdn, "XHTTP", "через CDN · TF-2", 640),
         r("ru-cdn", "🇷🇺", "Россия", .reserve, .cdn, "XHTTP", "через CDN · 6", 31),
     ]
 

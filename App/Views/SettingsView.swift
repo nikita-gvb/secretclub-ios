@@ -1,7 +1,8 @@
 import SwiftUI
+import UIKit
 
 enum SettingsRoute: Hashable {
-    case diagnostics, exceptions
+    case subscription, devices, appearance, exceptions, check, advanced, selfTest
 }
 
 struct SettingsView: View {
@@ -9,74 +10,95 @@ struct SettingsView: View {
     @AppStorage(SettingsKey.autoConnect) private var autoConnect = false
     @AppStorage(SettingsKey.killSwitch) private var killSwitch = false
     @AppStorage(SettingsKey.ruDirect) private var ruDirect = true
-    @AppStorage(SettingsKey.energySaver) private var energySaver = true
-    @AppStorage(SettingsKey.transport) private var transport: TransportPreference = .auto
-    @State private var path: [SettingsRoute] = []
-    @State private var appliedInitial = false
+    @AppStorage(SettingsKey.appearance) private var appearance: AppAppearance = .system
+    @AppStorage(SettingsKey.vpnDomains) private var vpnRaw = ""
+    @AppStorage(SettingsKey.directDomains) private var directRaw = ""
     @State private var confirmLogout = false
 
     var body: some View {
-        NavigationStack(path: $path) {
-            PageScroll {
-                PageHeader(title: "Настройки")
-
+        @Bindable var app = app
+        NavigationStack(path: $app.settingsPath) {
+            List {
                 accountSection
 
-                SCSection(header: "Подключение", footer: "Автоподключение само включит VPN, когда появится сеть. «Без VPN — без сети» не выпустит трафик мимо туннеля — применится при следующем подключении.") {
-                    Menu {
-                        Picker("Протокол", selection: $transport) {
-                            ForEach(TransportPreference.allCases) { Text($0.title).tag($0) }
+                if app.hasSession || !app.subscription.devices.isEmpty {
+                    Section {
+                        NavigationLink(value: SettingsRoute.subscription) {
+                            SettingsRow(icon: "creditcard.fill", color: Theme.tint, foreground: Theme.onTint,
+                                        title: "Подписка", value: subscriptionValue)
                         }
-                    } label: {
-                        SCRow(title: "Протокол", value: transport.title) {
-                            CellIcon(systemName: "point.3.connected.trianglepath.dotted")
-                        } trailing: {
-                            Image(systemName: "chevron.up.chevron.down")
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(Theme.label3)
+                        if !app.subscription.devices.isEmpty {
+                            NavigationLink(value: SettingsRoute.devices) {
+                                SettingsRow(icon: "iphone", color: Theme.blue, title: "Устройства", value: devicesValue)
+                            }
                         }
                     }
-                    .buttonStyle(RowButtonStyle())
-                    SCDivider()
-                    ToggleRow(title: "Автоподключение", icon: "bolt", isOn: $autoConnect)
-                    SCDivider()
-                    ToggleRow(title: "Без VPN — без сети", icon: "lock", isOn: $killSwitch)
+                } else {
+                    Section {
+                        NavigationLink(value: SettingsRoute.subscription) {
+                            SettingsRow(icon: "creditcard.fill", color: Theme.tint, foreground: Theme.onTint,
+                                        title: "Подписка", value: subscriptionValue)
+                        }
+                    }
                 }
 
-                SCSection(header: "Маршрутизация", footer: "Госуслуги, банки и сайты .ru/.рф открываются без VPN — быстрее и без капч.") {
-                    ToggleRow(title: "Российские сайты напрямую", icon: "house", isOn: $ruDirect)
-                    SCDivider()
+                Section {
+                    NavigationLink(value: SettingsRoute.appearance) {
+                        SettingsRow(icon: "circle.lefthalf.filled", color: .indigo, title: "Оформление", value: appearance.title)
+                    }
+                    Toggle(isOn: $autoConnect) {
+                        SettingsLabel(icon: "bolt.fill", color: Theme.green, title: "Подключаться само")
+                    }
+                    Toggle(isOn: $killSwitch) {
+                        SettingsLabel(icon: "lock.fill", color: Theme.red, title: "Без VPN — без интернета")
+                    }
+                } footer: {
+                    Text("«Подключаться само» включит VPN, как только появится сеть. «Без VPN — без интернета» не выпустит трафик мимо VPN — сработает со следующего подключения.")
+                }
+
+                Section {
+                    Toggle(isOn: $ruDirect) {
+                        SettingsLabel(icon: "arrow.triangle.branch", color: .teal, title: "Российские сайты без VPN")
+                    }
                     NavigationLink(value: SettingsRoute.exceptions) {
-                        SCRow(title: "Исключения", chevron: true) { CellIcon(systemName: "list.bullet") }
+                        SettingsRow(icon: "list.bullet", color: Theme.gray, title: "Исключения", value: exceptionsValue)
                     }
-                    .buttonStyle(RowButtonStyle())
+                } footer: {
+                    Text("Госуслуги, банки и сайты .ru откроются напрямую — быстрее и без капчи.")
                 }
 
-                SCSection(header: "Батарея", footer: "Реже обновляет подписку и не проверяет пинг при каждом запуске.") {
-                    ToggleRow(title: "Экономия заряда", icon: "leaf", isOn: $energySaver)
-                }
-
-                SCSection(header: "Помощь") {
-                    NavigationLink(value: SettingsRoute.diagnostics) {
-                        SCRow(title: "Диагностика", chevron: true) { CellIcon(systemName: "stethoscope") }
+                Section {
+                    NavigationLink(value: SettingsRoute.check) {
+                        SettingsRow(icon: "stethoscope", color: .pink, title: "Проверка соединения")
                     }
-                    .buttonStyle(RowButtonStyle())
-                    SCDivider()
                     Link(destination: Config.supportURL) {
-                        SCRow(title: "Поддержка в Telegram") {
-                            CellIcon(systemName: "paperplane")
-                        } trailing: {
-                            Image(systemName: "arrow.up.right")
-                                .font(.system(size: 13, weight: .semibold))
-                                .foregroundStyle(Theme.label3)
-                        }
+                        SettingsRow(icon: "paperplane.fill", color: Theme.telegram, title: "Поддержка", external: true)
                     }
-                    .buttonStyle(RowButtonStyle())
-                    SCDivider()
-                    SCRow(title: "Версия", value: Config.version) { CellIcon(systemName: "info") }
+                    NavigationLink(value: SettingsRoute.advanced) {
+                        SettingsRow(icon: "slider.horizontal.3", color: Theme.gray, title: "Дополнительно")
+                    }
+                }
+
+                Section {
+                    Button(role: .destructive) { confirmLogout = true } label: {
+                        Text("Выйти").foregroundStyle(Theme.red)
+                    }
                 }
             }
-            .toolbar(.hidden, for: .navigationBar)
+            .listStyle(.insetGrouped)
+            .navigationTitle("Настройки")
+            .toggleStyle(SwitchToggleStyle(tint: Theme.tint))
+            .navigationDestination(for: SettingsRoute.self) { route in
+                switch route {
+                case .subscription: SubscriptionScreen()
+                case .devices: DevicesScreen()
+                case .appearance: AppearanceView()
+                case .exceptions: ExceptionsView()
+                case .check: CheckView()
+                case .advanced: AdvancedView()
+                case .selfTest: SelfTestView()
+                }
+            }
             .confirmationDialog("Выйти из аккаунта?", isPresented: $confirmLogout, titleVisibility: .visible) {
                 Button("Выйти", role: .destructive) { app.logout() }
                 Button("Отмена", role: .cancel) {}
@@ -85,144 +107,349 @@ struct SettingsView: View {
             }
             .onChange(of: ruDirect) { app.settingsChanged() }
             .onChange(of: autoConnect) { _, on in app.autoConnectChanged(on) }
-            .navigationDestination(for: SettingsRoute.self) { route in
-                switch route {
-                case .diagnostics: DiagnosticsView()
-                case .exceptions: ExceptionsView()
-                }
-            }
-            .onAppear {
-                guard !appliedInitial else { return }
-                appliedInitial = true
-                if app.isDemo, app.initialScreen == "diagnostics" { path = [.diagnostics] }
-                if app.isDemo, app.initialScreen == "exceptions" { path = [.exceptions] }
-            }
+            .sensoryFeedback(.selection, trigger: autoConnect)
+            .sensoryFeedback(.selection, trigger: killSwitch)
+            .sensoryFeedback(.selection, trigger: ruDirect)
         }
     }
-}
 
-extension SettingsView {
-    private var accountSection: some View {
-        SCSection(header: "Аккаунт", footer: app.hasSession ? nil : "Войдите через Telegram — основная подписка и резервное подключение подтянутся сами.") {
+    @ViewBuilder private var accountSection: some View {
+        Section {
             if app.hasSession {
-                SCRow(title: app.account?.displayName ?? "Telegram",
-                      subtitle: app.account?.username.map { "@\($0) · вход через Telegram" } ?? "вход через Telegram") {
-                    CellIcon(systemName: "person.crop.circle.fill", color: Theme.tint)
+                NavigationLink(value: SettingsRoute.subscription) {
+                    HStack(spacing: 14) {
+                        Text(initial)
+                            .font(.sc(24, .semibold, design: .rounded, relativeTo: .title2))
+                            .foregroundStyle(Theme.onTint)
+                            .frame(width: 56, height: 56)
+                            .background(Circle().fill(Theme.tint))
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(app.account?.displayName ?? "Telegram")
+                                .font(.sc(20, .semibold, relativeTo: .title3))
+                                .foregroundStyle(Theme.label)
+                            Text(accountSubtitle)
+                                .font(.scSub)
+                                .foregroundStyle(app.subscriptionUsable ? Theme.label2 : Theme.red)
+                        }
+                        .lineLimit(1)
+                    }
+                    .padding(.vertical, 6)
                 }
             } else {
                 Button { app.showLogin = true } label: {
-                    SCRow(title: "Войти через Telegram", chevron: true) {
-                        CellIcon(systemName: "paperplane.fill", color: Theme.tint)
-                    }
-                }
-                .buttonStyle(RowButtonStyle())
-            }
-            SCDivider()
-            Button { confirmLogout = true } label: {
-                SCRow(title: "Выйти", titleColor: Theme.red) {
-                    CellIcon(systemName: "rectangle.portrait.and.arrow.right", color: Theme.red)
+                    SettingsRow(icon: "paperplane.fill", color: Theme.telegram, title: "Войти через Telegram",
+                                subtitle: "Подписка и резерв подтянутся сами")
                 }
             }
-            .buttonStyle(RowButtonStyle())
         }
+    }
+
+    private var initial: String {
+        let name = app.account?.displayName ?? "S"
+        return String(name.trimmingCharacters(in: CharacterSet(charactersIn: "@")).prefix(1)).uppercased()
+    }
+
+    private var accountSubtitle: String {
+        if app.needsSubscription { return "Подписки пока нет" }
+        let sub = app.subscription
+        if !sub.isActive { return sub.status == .limited ? "Трафик закончился" : "Подписка закончилась" }
+        if let days = sub.daysLeft { return "Подписка ещё \(Format.days(days))" }
+        return "Подписка бессрочная"
+    }
+
+    private var subscriptionValue: String {
+        if app.needsSubscription { return "нет" }
+        let sub = app.subscription
+        if !sub.isActive { return sub.status == .limited ? "нет трафика" : "закончилась" }
+        if let days = sub.daysLeft { return Format.days(days) }
+        return "бессрочно"
+    }
+
+    private var devicesValue: String {
+        let n = app.subscription.devices.count
+        return app.subscription.deviceLimit.map { "\(n) из \($0)" } ?? "\(n)"
+    }
+
+    private var exceptionsValue: String? {
+        let n = (vpnRaw + "\n" + directRaw).split(separator: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }.count
+        return n > 0 ? "\(n)" : nil
     }
 }
 
-struct ToggleRow: View {
-    let title: String
+// MARK: - Строки
+
+/// Строка настроек: цветная иконка, заголовок, подпись, значение.
+struct SettingsRow: View {
     let icon: String
-    @Binding var isOn: Bool
+    let color: Color
+    var foreground: Color = .white
+    let title: String
+    var subtitle: String? = nil
+    var value: String? = nil
+    var titleColor: Color = Theme.label
+    var external = false
+    var loading = false
 
     var body: some View {
-        Toggle(isOn: $isOn) {
-            HStack(spacing: 12) {
-                CellIcon(systemName: icon)
-                Text(title).font(.scBody).foregroundStyle(Theme.label).lineLimit(1)
+        HStack(spacing: 14) {
+            SquareIcon(systemName: icon, color: color, foreground: foreground)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title).foregroundStyle(titleColor)
+                if let subtitle {
+                    Text(subtitle).font(.scFoot).foregroundStyle(Theme.label2)
+                }
+            }
+            .lineLimit(1)
+            Spacer(minLength: 8)
+            if let value {
+                Text(value).foregroundStyle(Theme.label2).monospacedDigit().lineLimit(1)
+            }
+            if loading { ProgressView() }
+            if external {
+                Image(systemName: "arrow.up.right")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Theme.label3)
             }
         }
-        .tint(Theme.tintStrong)
-        .padding(.horizontal, 16)
-        .padding(.vertical, 9)
-        .frame(minHeight: 52)
+        .contentShape(Rectangle())
     }
 }
 
+struct SettingsLabel: View {
+    let icon: String
+    let color: Color
+    let title: String
+    var body: some View {
+        HStack(spacing: 14) {
+            SquareIcon(systemName: icon, color: color)
+            Text(title).foregroundStyle(Theme.label).lineLimit(1)
+        }
+    }
+}
+
+// MARK: - Оформление
+
+struct AppearanceView: View {
+    @AppStorage(SettingsKey.appearance) private var appearance: AppAppearance = .system
+
+    var body: some View {
+        List {
+            Section {
+                HStack(spacing: 10) {
+                    ForEach([AppAppearance.light, .dark, .system]) { option in
+                        ThemeCard(option: option, selected: appearance == option) { set(option) }
+                    }
+                }
+                .padding(.vertical, 10)
+            } footer: {
+                Text("«Как в системе» — светлое днём и тёмное вечером, как настроено в iPhone.")
+            }
+        }
+        .listStyle(.insetGrouped)
+        .navigationTitle("Оформление")
+        .navigationBarTitleDisplayMode(.inline)
+        .sensoryFeedback(.selection, trigger: appearance)
+    }
+
+    private func set(_ option: AppAppearance) {
+        guard option != appearance else { return }
+        AppearanceController.crossfade {
+            appearance = option
+            AppearanceController.apply(option)
+        }
+    }
+}
+
+private struct ThemeCard: View {
+    let option: AppAppearance
+    let selected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 10) {
+                preview
+                    .frame(width: 74, height: 116)
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Theme.separator, lineWidth: 0.5))
+                    .overlay(RoundedRectangle(cornerRadius: 17, style: .continuous)
+                        .strokeBorder(Theme.tint, lineWidth: 2.5)
+                        .padding(-4)
+                        .opacity(selected ? 1 : 0))
+                Text(option.title)
+                    .font(.sc(13, .medium, relativeTo: .footnote))
+                    .foregroundStyle(Theme.label)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                ZStack {
+                    Circle().strokeBorder(selected ? Theme.tint : Theme.label3, lineWidth: 1.5)
+                    if selected {
+                        Circle().fill(Theme.tint)
+                        Image(systemName: "checkmark").font(.system(size: 11, weight: .bold)).foregroundStyle(Theme.onTint)
+                    }
+                }
+                .frame(width: 22, height: 22)
+            }
+            .frame(maxWidth: .infinity)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PressScaleStyle(scale: 0.95))
+        .animation(.spring(response: 0.35, dampingFraction: 0.7), value: selected)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    @ViewBuilder private var preview: some View {
+        switch option {
+        case .light: MiniScreen(dark: false)
+        case .dark: MiniScreen(dark: true)
+        case .system:
+            ZStack {
+                MiniScreen(dark: false)
+                MiniScreen(dark: true)
+                    .mask(HStack(spacing: 0) { Color.clear; Color.black })
+            }
+        }
+    }
+}
+
+/// Маленький экран-образец темы.
+private struct MiniScreen: View {
+    let dark: Bool
+    var body: some View {
+        ZStack {
+            (dark ? Color.black : Color(hex: 0xF2F2F7))
+            VStack(spacing: 10) {
+                Circle()
+                    .fill(dark ? Color(hex: 0x2C2C2E) : .white)
+                    .frame(width: 32, height: 32)
+                    .shadow(color: .black.opacity(dark ? 0.5 : 0.12), radius: 4, y: 2)
+                    .overlay(Image(systemName: "power").font(.system(size: 12, weight: .bold)).foregroundStyle(Color(hex: 0x8E8E93)))
+                Capsule().fill(dark ? Color(hex: 0x3A3A3C) : Color(hex: 0xD1D1D6)).frame(width: 34, height: 4)
+                Capsule().fill(dark ? Color(hex: 0x1C1C1E) : .white).frame(width: 52, height: 12)
+            }
+        }
+    }
+}
+
+// MARK: - Дополнительно
+
+struct AdvancedView: View {
+    @Environment(AppModel.self) private var app
+    @AppStorage(SettingsKey.transport) private var transport: TransportPreference = .auto
+    @AppStorage(SettingsKey.energySaver) private var energySaver = true
+
+    var body: some View {
+        List {
+            Section {
+                ForEach(TransportPreference.allCases) { option in
+                    Button { transport = option } label: {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(option.title).foregroundStyle(Theme.label)
+                                Text(option.subtitle).font(.scFoot).foregroundStyle(Theme.label2)
+                            }
+                            Spacer()
+                            CheckIcon(on: transport == option)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                }
+            } header: {
+                Text("Способ подключения")
+            } footer: {
+                Text("Применится при следующем подключении или смене сервера.")
+            }
+
+            Section {
+                Toggle(isOn: $energySaver) {
+                    SettingsLabel(icon: "leaf.fill", color: Theme.green, title: "Экономия заряда")
+                }
+            } footer: {
+                Text("Реже проверяет связь и обновляет подписку в фоне. Переключение при смене сети может занять чуть дольше.")
+            }
+
+            Section {
+                SettingsRow(icon: "info", color: Theme.gray, title: "Версия", value: Config.version)
+                Button {
+                    UIPasteboard.general.string = app.supportReport()
+                    app.showToast("Отчёт скопирован — отправьте его в поддержку", icon: "doc.on.doc.fill", tone: .good)
+                } label: {
+                    SettingsRow(icon: "doc.on.doc.fill", color: Theme.gray, title: "Скопировать отчёт")
+                }
+                NavigationLink(value: SettingsRoute.selfTest) {
+                    SettingsRow(icon: "checkmark.shield.fill", color: Theme.gray, title: "Проверка VPN-профиля")
+                }
+            } footer: {
+                Text("Отчёт — технические подробности для поддержки. Личные данные и история сайтов в него не попадают.")
+            }
+        }
+        .listStyle(.insetGrouped)
+        .toggleStyle(SwitchToggleStyle(tint: Theme.tint))
+        .navigationTitle("Дополнительно")
+        .navigationBarTitleDisplayMode(.inline)
+        .sensoryFeedback(.selection, trigger: transport)
+    }
+}
+
+// MARK: - Исключения
+
 enum ExceptionTarget: String, CaseIterable, Identifiable {
-    case vpn, direct
+    case direct, vpn
     var id: String { rawValue }
-    var title: String { self == .vpn ? "Через VPN" : "Напрямую" }
 }
 
 struct ExceptionsView: View {
     @Environment(AppModel.self) private var app
     @AppStorage(SettingsKey.vpnDomains) private var vpnRaw = ""
     @AppStorage(SettingsKey.directDomains) private var directRaw = ""
+    @State private var adding: ExceptionTarget?
     @State private var newDomain = ""
-    @State private var target: ExceptionTarget = .vpn
-    @FocusState private var focused: Bool
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                VStack(spacing: 10) {
-                    HStack(spacing: 8) {
-                        TextField("", text: $newDomain, prompt: Text("example.com").foregroundStyle(Theme.label3))
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                            .keyboardType(.URL)
-                            .focused($focused)
-                            .onSubmit(add)
-                            .scField(focused: focused)
-                        Button("Добавить", action: add)
-                            .buttonStyle(.sc(.tinted, small: true))
-                            .disabled(normalized(newDomain) == nil)
-                    }
-                    Picker("Куда", selection: $target) {
-                        ForEach(ExceptionTarget.allCases) { Text($0.title).tag($0) }
-                    }
-                    .pickerStyle(.segmented)
-                    Text(verbatim: "Правило действует и для поддоменов: example.com включает www.example.com.")
-                        .font(.scFoot)
-                        .foregroundStyle(Theme.label2)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 4)
-                }
-                section(.vpn, header: "Всегда через VPN")
-                section(.direct, header: "Всегда напрямую")
-            }
-            .padding(.horizontal, 16)
-            .padding(.top, 12)
+        List {
+            section(.direct, header: "Всегда без VPN",
+                    footer: "Эти сайты всегда открываются напрямую — например, банк, который не любит зарубежные адреса. Поддомены тоже.")
+            section(.vpn, header: "Всегда через VPN",
+                    footer: "Эти сайты всегда открываются через VPN, даже если они российские.")
         }
-        .scrollIndicators(.hidden)
-        .contentMargins(.bottom, 28, for: .scrollContent)
-        .background(AppBackground(glow: 0))
+        .listStyle(.insetGrouped)
         .navigationTitle("Исключения")
         .navigationBarTitleDisplayMode(.inline)
+        .alert("Добавить сайт", isPresented: Binding(get: { adding != nil }, set: { if !$0 { adding = nil } })) {
+            TextField("example.com", text: $newDomain)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .keyboardType(.URL)
+            Button("Добавить") { add() }
+            Button("Отмена", role: .cancel) { newDomain = "" }
+        } message: {
+            Text(adding == .vpn ? "Будет открываться только через VPN." : "Будет открываться без VPN.")
+        }
         .onChange(of: vpnRaw) { app.settingsChanged() }
         .onChange(of: directRaw) { app.settingsChanged() }
     }
 
-    private func section(_ t: ExceptionTarget, header: String) -> some View {
-        let items = domains(t)
-        return SCSection(header: header) {
-            if items.isEmpty {
-                SCRow(title: "Пока пусто", titleColor: Theme.label3)
-            } else {
-                ForEach(Array(items.enumerated()), id: \.element) { index, domain in
-                    if index > 0 { SCDivider(inset: 16) }
-                    SCRow(title: domain, leading: { EmptyView() }, trailing: {
-                        Button {
-                            remove(domain, from: t)
-                        } label: {
-                            Image(systemName: "minus.circle.fill")
-                                .font(.system(size: 20))
-                                .foregroundStyle(Theme.red)
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Удалить \(domain)")
-                    })
-                }
+    private func section(_ target: ExceptionTarget, header: String, footer: String) -> some View {
+        Section {
+            ForEach(domains(target), id: \.self) { domain in
+                Text(domain).foregroundStyle(Theme.label)
             }
+            .onDelete { offsets in
+                var list = domains(target)
+                list.remove(atOffsets: offsets)
+                setDomains(list, for: target)
+            }
+            Button {
+                newDomain = ""
+                adding = target
+            } label: {
+                Label("Добавить сайт", systemImage: "plus.circle.fill")
+                    .foregroundStyle(Theme.ink)
+            }
+        } header: {
+            Text(header)
+        } footer: {
+            Text(footer)
         }
     }
 
@@ -235,10 +462,6 @@ struct ExceptionsView: View {
         if t == .vpn { vpnRaw = raw } else { directRaw = raw }
     }
 
-    private func remove(_ domain: String, from t: ExceptionTarget) {
-        setDomains(domains(t).filter { $0 != domain }, for: t)
-    }
-
     private func normalized(_ s: String) -> String? {
         var d = s.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if let r = d.range(of: "://") { d = String(d[r.upperBound...]) }
@@ -248,10 +471,15 @@ struct ExceptionsView: View {
     }
 
     private func add() {
-        guard let d = normalized(newDomain) else { return }
+        defer { newDomain = "" }
+        guard let target = adding, let d = normalized(newDomain) else {
+            if !newDomain.trimmingCharacters(in: .whitespaces).isEmpty {
+                app.showToast("Не похоже на адрес сайта — например, sberbank.ru", icon: "exclamationmark.circle.fill", tone: .bad)
+            }
+            return
+        }
         var list = domains(target)
         if !list.contains(d) { list.append(d) }
-        setDomains(list, for: target)
-        newDomain = ""
+        withAnimation { setDomains(list, for: target) }
     }
 }

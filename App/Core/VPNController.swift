@@ -31,6 +31,11 @@ final class VPNController {
     var bytesIn: Int64 = 0
     var bytesOut: Int64 = 0
     var report: TunnelReport?
+    /// Скорость сейчас (байт/с) и история за последние ~40 секунд — для сводки.
+    var rateIn: Double = 0
+    var rateOut: Double = 0
+    var rateHistory: [Double] = Array(repeating: 0, count: 40)
+    @ObservationIgnored private var lastSample: (date: Date, down: Int64, up: Int64)?
 
     @ObservationIgnored private var manager: NETunnelProviderManager?
     @ObservationIgnored private var observer: NSObjectProtocol?
@@ -55,7 +60,55 @@ final class VPNController {
             connectedSince = Date().addingTimeInterval(-(42 * 60 + 17))
             bytesIn = 2_576_980_378
             bytesOut = 327_155_712
+            rateIn = 4.4 * 1_048_576
+            rateOut = 0.6 * 1_048_576
+            rateHistory = (0..<40).map { i in
+                let x = Double(i)
+                return (3.2 + 1.1 * sin(x / 3.1) + 0.6 * sin(x / 1.3 + 1) + 0.25 * cos(x * 1.7)) * 1_048_576
+            }
+            startDemoTicker()
         }
+    }
+
+    /// Демо: живые цифры скорости и трафика.
+    private func startDemoTicker() {
+        statsTask?.cancel()
+        statsTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard let self else { return }
+                guard self.state == .connected else { continue }
+                let next = max(0.4, min(7.5, self.rateIn / 1_048_576 + Double.random(in: -0.9...0.95))) * 1_048_576
+                self.rateIn = next
+                self.rateOut = next * Double.random(in: 0.1...0.2)
+                self.bytesIn += Int64(next)
+                self.bytesOut += Int64(self.rateOut)
+                self.rateHistory.append(next)
+                self.rateHistory.removeFirst()
+            }
+        }
+    }
+
+    /// Новые счётчики трафика от расширения → скорость.
+    private func sample(_ r: TunnelReport) {
+        let now = Date()
+        if let last = lastSample {
+            let dt = now.timeIntervalSince(last.date)
+            if dt > 0.3 {
+                rateIn = max(0, Double(r.downlink - last.down) / dt)
+                rateOut = max(0, Double(r.uplink - last.up) / dt)
+                rateHistory.append(rateIn)
+                if rateHistory.count > 40 { rateHistory.removeFirst(rateHistory.count - 40) }
+            }
+        }
+        lastSample = (now, r.downlink, r.uplink)
+    }
+
+    private func resetRates() {
+        lastSample = nil
+        rateIn = 0
+        rateOut = 0
+        rateHistory = Array(repeating: 0, count: 40)
     }
 
     func load() async {
@@ -123,9 +176,11 @@ final class VPNController {
         lastError = nil
         if isDemo {
             state = .connecting
-            try? await Task.sleep(for: .seconds(1))
+            try? await Task.sleep(for: .seconds(1.6))
+            guard state == .connecting else { return }
             state = .connected
             connectedSince = Date()
+            if statsTask == nil { startDemoTicker() }
             return
         }
         state = .connecting
@@ -147,7 +202,7 @@ final class VPNController {
         update(status)
         guard status == .connected else {
             let reason = await disconnectReason(m)
-            throw VPNError(reason ?? "Не удалось подключиться к «\(request.routeTitle)». Попробуйте другую локацию.")
+            throw VPNError(reason ?? "Не удалось подключиться к «\(request.routeTitle)». Попробуйте другой сервер.")
         }
     }
 
@@ -167,6 +222,8 @@ final class VPNController {
         if isDemo {
             state = .disconnected
             connectedSince = nil
+            rateIn = 0
+            rateOut = 0
             return
         }
         guard let m = manager else { state = .disconnected; return }
@@ -274,6 +331,7 @@ final class VPNController {
                 guard let self else { return }
                 if let r = await self.send(TunnelCommand(kind: .status), attempts: 1, timeout: 2) {
                     if self.report != r { self.report = r }
+                    self.sample(r)
                     self.bytesIn = r.downlink
                     self.bytesOut = r.uplink
                     self.onReport?(r)
@@ -286,6 +344,7 @@ final class VPNController {
     private func stopStats() {
         statsTask?.cancel()
         statsTask = nil
+        lastSample = nil
     }
 
     // MARK: - Диагностика
@@ -385,6 +444,7 @@ final class VPNController {
             bytesOut = 0
             report = nil
             stopStats()
+            resetRates()
         }
     }
 

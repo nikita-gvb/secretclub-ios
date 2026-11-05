@@ -157,4 +157,45 @@ final class CoreConfigTests: XCTestCase {
         let list: [[String: Any]] = [["tag": "direct", "protocol": "freedom"], ["tag": "x", "protocol": "hysteria2"]]
         XCTAssertEqual(CoreConfig.mainOutbound(list)?["tag"] as? String, "x")
     }
+
+    func testDNSProbeInboundGoesToDNSOutbound() throws {
+        let built = try CoreConfig.compose(active: server("a.example"), fd: 3, assetDir: nil, healthPort: 1000,
+                                           extras: [("B", server("b.example"))], ports: [2001, 2002],
+                                           activeID: "A", hot: true, dnsPort: 3000)
+        XCTAssertTrue(built.dns)
+        XCTAssertTrue(built.hot)
+        let probe = try XCTUnwrap(inbounds(built.text).first { ($0["tag"] as? String) == CoreConfig.dnsProbeTag })
+        XCTAssertEqual(probe["port"] as? Int, 3000)
+        XCTAssertEqual(probe["listen"] as? String, "127.0.0.1")
+        XCTAssertEqual(probe["protocol"] as? String, "dokodemo-door")
+        XCTAssertEqual((probe["settings"] as? [String: Any])?["network"] as? String, "udp")
+        let first = try XCTUnwrap(rules(built.text).first)
+        XCTAssertEqual(first["inboundTag"] as? [String], [CoreConfig.dnsProbeTag])
+        XCTAssertEqual(first["outboundTag"] as? String, "dns-out")
+    }
+
+    func testNoDNSProbeWithoutPortOrDNSOutbound() throws {
+        let plain = try CoreConfig.compose(active: server("a.example"), fd: 3, assetDir: nil, healthPort: 1000,
+                                           extras: [], ports: [])
+        XCTAssertFalse(plain.dns)
+        XCTAssertFalse(inbounds(plain.text).contains { ($0["tag"] as? String) == CoreConfig.dnsProbeTag })
+        let noDNS = CoreConfig.text(["outbounds": [["tag": "proxy", "protocol": "vless"]]])!
+        let built = try CoreConfig.compose(active: noDNS, fd: 3, assetDir: nil, healthPort: 1000, extras: [], ports: [], dnsPort: 3000)
+        XCTAssertFalse(built.dns)
+    }
+
+    func testDNSProbePacket() {
+        let q = DNSProbe.query(name: "sc-x.google.com", id: 0x1234)
+        XCTAssertEqual(Array(q.prefix(4)), [0x12, 0x34, 0x01, 0x00])
+        XCTAssertEqual(q.count, 12 + (1 + 4) + (1 + 6) + (1 + 3) + 1 + 4)
+        XCTAssertEqual(Array(q.suffix(5)), [0x00, 0x00, 0x01, 0x00, 0x01])
+        XCTAssertFalse(DNSProbe.isResponse(q, id: 0x1234), "сам запрос — не ответ")
+        var answer = q
+        answer[2] |= 0x80
+        answer[3] = 0x83
+        XCTAssertTrue(DNSProbe.isResponse(answer, id: 0x1234), "«такого имени нет» — тоже ответ")
+        XCTAssertFalse(DNSProbe.isResponse(answer, id: 0x4321))
+        XCTAssertTrue(DNSProbe.randomName().hasSuffix(".google.com"))
+        XCTAssertNotEqual(DNSProbe.randomName(), DNSProbe.randomName())
+    }
 }

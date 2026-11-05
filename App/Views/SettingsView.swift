@@ -159,7 +159,7 @@ struct SettingsView: View {
             } else {
                 Button { app.showLogin = true } label: {
                     SettingsRow(icon: "paperplane.fill", color: Theme.telegram, title: "Войти через Telegram",
-                                subtitle: "Подписка и резерв подтянутся сами")
+                                subtitle: "Подписка и обход белых списков подтянутся сами")
                 }
             }
         }

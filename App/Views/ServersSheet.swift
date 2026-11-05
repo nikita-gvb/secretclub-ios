@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Шторка серверов из капсулы: «Авто», обычные, для мобильной сети, резерв.
+/// Шторка серверов из капсулы: «Авто», обычные, мосты, обход белых списков.
 struct ServersSheet: View {
     @Environment(AppModel.self) private var app
     @Environment(\.dismiss) private var dismiss
@@ -179,7 +179,7 @@ struct ServersSheet: View {
 
     private var autoSubtitle: String {
         if app.autoMode, live, let route = app.displayRoute {
-            let kind = route.group == .regular ? "" : " · \(route.group.shortTitle.lowercased())"
+            let kind = route.group == .regular ? "" : " · \(route.group.tag)"
             return "Сейчас: \(route.emoji) \(route.title)\(kind)"
         }
         return "Выберем самый быстрый и сами сменим, если что-то пойдёт не так"
@@ -261,7 +261,7 @@ struct ServersSheet: View {
         return route.ping ?? (Int.max - 1)
     }
 
-    // MARK: Резерв
+    // MARK: Обход белых списков
 
     @ViewBuilder private var reserveSection: some View {
         let group = RouteGroup.reserve

@@ -65,7 +65,7 @@ final class SharedModelTests: XCTestCase {
     }
 
     func testGroupOrder() {
-        XCTAssertEqual(AutoPool.order(for: .whitelist), ["bridge", "reserve"])
+        XCTAssertEqual(AutoPool.order(for: .whitelist), ["reserve", "bridge"])
         XCTAssertLessThan(AutoPool.rank("regular"), AutoPool.rank("bridge"))
         XCTAssertLessThan(AutoPool.rank("bridge"), AutoPool.rank("reserve"))
         XCTAssertEqual(AutoPool.rank("unknown"), AutoPool.priority.count)

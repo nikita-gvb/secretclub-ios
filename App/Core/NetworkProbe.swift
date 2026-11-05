@@ -89,3 +89,27 @@ extension NetworkProbe {
         return TraceResult(ip: ip, location: loc, ms: Int(Date().timeIntervalSince(start) * 1000))
     }
 }
+
+extension NetworkProbe {
+    /// Имя сайта через системный DNS (при включённом VPN — через туннель, как у всех приложений).
+    /// Имя случайное — кэш iOS не подменит ответ; «такого имени нет» — тоже ответ: DNS работает.
+    /// Миллисекунды или nil — DNS не ответил за timeout.
+    static func systemDNS(timeout: Double = 6) async -> Int? {
+        let name = DNSProbe.randomName()
+        let start = Date()
+        return await withCheckedContinuation { (cont: CheckedContinuation<Int?, Never>) in
+            let once = ResumeOnce(cont)
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { once.resume(nil) }
+            Thread.detachNewThread {
+                var hints = addrinfo()
+                hints.ai_family = AF_INET
+                hints.ai_socktype = SOCK_STREAM
+                var result: UnsafeMutablePointer<addrinfo>?
+                let code = getaddrinfo(name, nil, &hints, &result)
+                if let result { freeaddrinfo(result) }
+                let ms = max(1, Int(Date().timeIntervalSince(start) * 1000))
+                once.resume(code == 0 || code == EAI_NONAME ? ms : nil)
+            }
+        }
+    }
+}

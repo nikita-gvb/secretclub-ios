@@ -171,9 +171,9 @@ struct SubscriptionScreen: View {
         return app.subscription.deviceLimit.map { "\(n) из \($0)" } ?? "\(n)"
     }
 
-    // MARK: Резерв
+    // MARK: Обход белых списков (резервное подключение)
 
-    private let reserveFooter = "Включается само, если обычные серверы недоступны. Тратится, только пока работает."
+    private let reserveFooter = "Резервное подключение для мобильного интернета с белыми списками. Включается само, если остальное не работает; трафик тратится, только пока оно работает."
 
     @ViewBuilder private var reserveSection: some View {
         if let reserve = app.reserve {
@@ -184,7 +184,7 @@ struct SubscriptionScreen: View {
                 }
                 .foregroundStyle(Theme.label)
             } header: {
-                Text("Резервное подключение")
+                Text("Обход белых списков")
             } footer: {
                 Text(reserveFooter)
             }
@@ -194,7 +194,7 @@ struct SubscriptionScreen: View {
                     Task {
                         await app.createReserve()
                         if app.reserve != nil {
-                            app.showToast("Резерв подключён — \(account.freeReserveMB) МБ в подарок", icon: "gift.fill", tone: .good)
+                            app.showToast("Обход белых списков подключён — \(account.freeReserveMB) МБ в подарок", icon: "gift.fill", tone: .good)
                         }
                     }
                 } label: {
@@ -204,7 +204,7 @@ struct SubscriptionScreen: View {
                 }
                 .disabled(app.busyAction != nil)
             } header: {
-                Text("Резервное подключение")
+                Text("Обход белых списков")
             } footer: {
                 Text(reserveFooter)
             }
@@ -214,9 +214,9 @@ struct SubscriptionScreen: View {
                     SettingsRow(icon: "link", color: Theme.gray, title: "Добавить ссылку")
                 }
             } header: {
-                Text("Резервное подключение")
+                Text("Обход белых списков")
             } footer: {
-                Text("Ссылку можно взять в боте. Или войдите через Telegram — резерв подтянется сам.")
+                Text("Ссылку резервного подключения можно взять в боте. Или войдите через Telegram — она подтянется сама.")
             }
         }
     }
@@ -323,7 +323,7 @@ struct DevicesScreen: View {
                 row(device, canUnlink: sub.fromAccount && !device.isCurrent, reserve: reserve)
             }
         } header: {
-            if reserve { Text("Резервное подключение") }
+            if reserve { Text("Обход белых списков") }
         } footer: {
             Text(footer(sub))
         }

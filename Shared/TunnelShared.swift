@@ -46,16 +46,18 @@ struct AutoPool: Codable {
 
     func group(of id: String?) -> String? { candidates.first { $0.id == id }?.group }
 
-    /// Порядок групп для режима сети: резерв — в последнюю очередь (у него ограничен трафик).
+    /// С чего начинать в режиме сети: при белых списках — с обхода белых списков (reserve), обычные серверы
+    /// и мосты там не открываются. Иначе обход — последним: у него ограничен трафик.
     static func order(for network: NetKind) -> [String] {
-        network == .whitelist ? ["bridge", "reserve"] : ["regular", "bridge", "reserve"]
+        network == .whitelist ? ["reserve", "bridge"] : ["regular", "bridge", "reserve"]
     }
 
-    /// Все группы по приоритету: обычные → мосты → резерв.
+    /// Какой из рабочих серверов лучше: обычные → мосты → обход белых списков (ограничен трафик).
+    /// Заработал более дешёвый — переходим на него и при белых списках (значит, они уже не действуют).
     static let priority = ["regular", "bridge", "reserve"]
     static func rank(_ group: String) -> Int { priority.firstIndex(of: group) ?? priority.count }
 
-    /// Порядок попыток: до двух лучших из каждой группы (обычные → мосты → резерв), всего до 4 —
+    /// Порядок попыток: до двух лучших из каждой группы (обычные → мосты → обход), всего до 4 —
     /// чтобы при «общей» беде группы (замирание, белый список) следующим шёл сервер другого типа.
     static func diverse(_ ranked: [AutoCandidate]) -> [AutoCandidate] {
         var counts: [String: Int] = [:]
@@ -131,6 +133,9 @@ struct TunnelReport: Codable, Equatable {
     var group: String? = nil
     /// Ответ на команду log: сбои, которые заметило само расширение.
     var incidents: [Incident]? = nil
+    /// Последняя проверка DNS через ядро (как у приложений): nil — не проверяли, false — не ответил.
+    var dnsOK: Bool? = nil
+    var dnsMS: Int? = nil
 }
 
 enum TunnelCoding {

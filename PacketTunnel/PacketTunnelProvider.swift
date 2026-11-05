@@ -22,6 +22,14 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     /// Локальный HTTP-вход ядра для проверки рабочего сервера.
     var healthPort = 0
+    /// Проверочный вход DNS (UDP) в ядре; dnsReady — он есть в запущенном конфиге.
+    var dnsPort = 0
+    var dnsReady = false
+    /// Последняя удачная проверка DNS: сервер, запуск ядра, время.
+    var dnsOK: (route: String, launched: Date?, at: Date)?
+    /// В этой сети: из-за DNS уже перезапускали ядро / DNS не работает и после перезапуска.
+    var dnsRestarted: Set<String> = []
+    var dnsBroken: Set<String> = []
     var active: Active?
     /// Проверочные входы запасных серверов в запущенном ядре: id → порт.
     var extraPorts: [String: Int] = [:]
@@ -100,8 +108,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     enum CheckReason: String {
         /// start — запуск туннеля, network — сменилась сеть, stall — трафик уходит, а ответов нет,
         /// app — попросило приложение, retry — повтор после неудачи, wake — устройство проснулось,
-        /// reload — приложение сменило сервер.
-        case start, network, stall, app, retry, wake, reload
+        /// reload — приложение сменило сервер, dns — через рабочий сервер не проходят DNS-запросы.
+        case start, network, stall, app, retry, wake, reload, dns
     }
 
     // MARK: - Жизненный цикл
@@ -331,10 +339,12 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             throw Self.error("не найден дескриптор utun")
         }
         if healthPort == 0 { healthPort = XrayEngine.freePort() ?? 49228 }
+        // -1 — ядро не приняло вход DNS, в этом сеансе без проверки DNS.
+        if dnsPort == 0 { dnsPort = XrayEngine.freePorts(2).first { $0 != healthPort } ?? 0 }
         let extras = multiBroken ? [] : extrasFor(target.id)
         var ports: [Int] = []
         if !extras.isEmpty {
-            ports = XrayEngine.freePorts(extras.count + 2).filter { $0 != healthPort }
+            ports = XrayEngine.freePorts(extras.count + 3).filter { $0 != healthPort && $0 != dnsPort }
         }
         var attempts: [(extras: [(id: String, config: String)], hot: Bool)] = []
         if !extras.isEmpty {
@@ -345,10 +355,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         let assets = Bundle.main.resourcePath
         var built: CoreConfig.Built?
         var lastError: Error?
-        for attempt in attempts {
+        func run(_ attempt: (extras: [(id: String, config: String)], hot: Bool), dns: Bool) throws -> CoreConfig.Built {
+            let candidate = try CoreConfig.compose(active: target.config, fd: fd, assetDir: assets, healthPort: healthPort,
+                                                   extras: attempt.extras, ports: ports, activeID: target.id, hot: attempt.hot,
+                                                   dnsPort: dns ? dnsPort : 0)
             do {
-                let candidate = try CoreConfig.compose(active: target.config, fd: fd, assetDir: assets, healthPort: healthPort,
-                                                       extras: attempt.extras, ports: ports, activeID: target.id, hot: attempt.hot)
                 try XrayEngine.runSync(candidate.text)
                 // Балансировщик сразу направляем на рабочий сервер, иначе он выберет outbound сам.
                 if candidate.balanced {
@@ -356,24 +367,39 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                         throw Self.error("ядро не переключает балансировщик")
                     }
                 }
-                built = candidate
+            } catch {
+                XrayEngine.stopSync()
+                throw error
+            }
+            return candidate
+        }
+        for attempt in attempts {
+            do {
+                built = try run(attempt, dns: dnsPort > 0)
                 break
             } catch {
                 lastError = error
-                XrayEngine.stopSync()
-                if attempt.hot {
-                    hotBroken = true
-                    event("ядро не приняло конфиг для переключения без перезапуска (\(error.localizedDescription)) — переключаем перезапуском")
-                } else if !attempt.extras.isEmpty {
-                    // Какой-то запасной сервер ядру не понравился — работаем по-старому, по одному серверу.
-                    multiBroken = true
-                    event("ядро не приняло общий конфиг (\(error.localizedDescription)) — проверяем по одному")
-                }
+            }
+            // Сначала то же самое без проверочного входа DNS: не путаем его сбой со сбоем запасных серверов.
+            if dnsPort > 0, let plain = try? run(attempt, dns: false) {
+                event("ядро не приняло проверочный вход DNS (\(lastError?.localizedDescription ?? "?")) — без проверки DNS")
+                dnsPort = -1
+                built = plain
+                break
+            }
+            if attempt.hot {
+                hotBroken = true
+                event("ядро не приняло конфиг для переключения без перезапуска (\(lastError?.localizedDescription ?? "?")) — переключаем перезапуском")
+            } else if !attempt.extras.isEmpty {
+                // Какой-то запасной сервер ядру не понравился — работаем по-старому, по одному серверу.
+                multiBroken = true
+                event("ядро не приняло общий конфиг (\(lastError?.localizedDescription ?? "?")) — проверяем по одному")
             }
         }
         guard let built else { throw lastError ?? Self.error("ядро не запустилось") }
         extraPorts = built.ports
         routeTags = built.hot ? built.tags : [:]
+        dnsReady = built.dns
         active = target
         counterNames = CoreConfig.counterNames(target.config)
         launchedAt = Date()

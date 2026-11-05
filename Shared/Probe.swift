@@ -77,10 +77,12 @@ final class ProbeConnection: @unchecked Sendable {
         connection.cancel()
     }
 
-    func send(_ text: String) async -> Bool {
+    func send(_ text: String) async -> Bool { await send(data: Data(text.utf8)) }
+
+    func send(data: Data) async -> Bool {
         if isClosed { return false }
         return await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
-            connection.send(content: Data(text.utf8), completion: .contentProcessed { error in
+            connection.send(content: data, completion: .contentProcessed { error in
                 cont.resume(returning: error == nil)
             })
         }
@@ -156,7 +158,7 @@ enum LatencyProbe {
     }
 
     /// Выполняет body, закрывая соединение при отмене задачи (ранний выход из параллельных замеров).
-    private static func using<T>(_ c: ProbeConnection, _ body: () async -> T) async -> T {
+    static func using<T>(_ c: ProbeConnection, _ body: () async -> T) async -> T {
         await withTaskCancellationHandler {
             let result = await body()
             c.close()
@@ -276,5 +278,50 @@ enum LatencyProbe {
             }
             return .stalled(received)
         }
+    }
+}
+
+/// Проверка DNS через ядро: A-запрос на проверочный вход dns-probe проходит тем же путём, что и
+/// DNS-запросы приложений (dns-out → DNS ядра → DNS-серверы из подписки, обычно через сервер).
+/// Имя каждый раз новое — кэш ядра не отвечает за сеть. Любой ответ (и «такого имени нет») — DNS работает.
+enum DNSProbe {
+    static func randomName() -> String {
+        let letters = Array("abcdefghijklmnopqrstuvwxyz0123456789")
+        let label = String((0..<12).map { _ in letters.randomElement()! })
+        return "sc-\(label).google.com"
+    }
+
+    /// DNS-запрос A-записи (RD=1).
+    static func query(name: String, id: UInt16) -> Data {
+        var d = Data([UInt8(id >> 8), UInt8(id & 0xff), 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+        for label in name.split(separator: ".") {
+            let bytes = Array(label.utf8.prefix(63))
+            d.append(UInt8(bytes.count))
+            d.append(contentsOf: bytes)
+        }
+        d.append(contentsOf: [0x00, 0x00, 0x01, 0x00, 0x01])
+        return d
+    }
+
+    /// Ответ на наш запрос: тот же id и флаг QR.
+    static func isResponse(_ data: Data, id: UInt16) -> Bool {
+        let b = [UInt8](data.prefix(4))
+        guard b.count == 4 else { return false }
+        return (UInt16(b[0]) << 8 | UInt16(b[1])) == id && b[2] & 0x80 != 0
+    }
+
+    /// Миллисекунды до ответа или nil — DNS через ядро не ответил за timeout.
+    static func viaCore(port: Int, timeout: Double = 5) async -> Int? {
+        guard let c = ProbeConnection(host: "127.0.0.1", port: port, parameters: .udp) else { return nil }
+        let id = UInt16.random(in: 1...UInt16.max)
+        let start = DispatchTime.now()
+        let ok: Bool = await LatencyProbe.using(c) {
+            guard await c.open(timeout: timeout), await c.send(data: query(name: randomName(), id: id)) else { return false }
+            while let data = await c.receiveChunk() {
+                if isResponse(data, id: id) { return true }
+            }
+            return false
+        }
+        return ok ? LatencyProbe.elapsedMS(since: start) : nil
     }
 }

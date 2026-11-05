@@ -102,6 +102,10 @@ struct DiagnosticsCenter: View {
                      value: report?.hot == true ? "Без обрыва" : (report?.multi == true ? "Перезапуском" : "—"),
                      detail: report?.lastSwitchMS.map { String(format: "последняя %.1f с", Double($0) / 1000) },
                      tone: report?.hot == true ? .good : .neutral)
+            DiagTile(icon: "globe", title: "DNS через VPN",
+                     value: connected ? (report?.dnsOK.map { $0 ? "Отвечает" : "Не отвечает" } ?? "—") : "—",
+                     detail: connected ? (report?.dnsOK == false ? "сайты не откроются" : report?.dnsMS.map { "\($0) мс" }) : nil,
+                     tone: !connected ? .neutral : (report?.dnsOK.map { $0 ? DiagTile.Tone.good : DiagTile.Tone.bad } ?? .neutral))
             DiagTile(icon: "chart.bar.fill", title: "Счётчики трафика",
                      value: report?.counters == "core" ? "Ядро" : (report?.counters == "utun" ? "Интерфейс" : "—"),
                      detail: report.map { "↓ \(Format.bytes($0.downlink)) ↑ \(Format.bytes($0.uplink))" },

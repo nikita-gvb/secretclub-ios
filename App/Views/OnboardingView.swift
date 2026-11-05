@@ -23,7 +23,7 @@ struct OnboardingView: View {
 
                 VStack(alignment: .leading, spacing: 18) {
                     FeatureRow(icon: "sparkles", title: "Авто-режим", text: "Сам находит рабочий маршрут в любой сети")
-                    FeatureRow(icon: "lifepreserver", title: "Резервное подключение", text: "Выручит, когда остальное не работает")
+                    FeatureRow(icon: "lifepreserver", title: "Обход белых списков", text: "Когда мобильный интернет пускает только на разрешённые сайты")
                     FeatureRow(icon: "leaf", title: "Бережёт батарею", text: "Без лишних фоновых проверок")
                 }
                 .padding(.top, 40)
@@ -104,7 +104,7 @@ struct PasteLinkSheet: View {
     var body: some View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 14) {
-                Text(reserve ? "Скопируйте в боте ссылку резервного подключения и вставьте её сюда." : "Скопируйте ссылку на подписку в боте и вставьте её сюда.")
+                Text(reserve ? "Скопируйте в боте ссылку резервного подключения (обход белых списков) и вставьте её сюда." : "Скопируйте ссылку на подписку в боте и вставьте её сюда.")
                     .font(.scSub)
                     .foregroundStyle(Theme.label2)
                     .padding(.horizontal, 4)
@@ -155,7 +155,7 @@ struct PasteLinkSheet: View {
             }
             .padding(16)
             .background(Theme.background.ignoresSafeArea())
-            .navigationTitle(reserve ? "Резервное подключение" : "Ссылка на подписку")
+            .navigationTitle(reserve ? "Обход белых списков" : "Ссылка на подписку")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {

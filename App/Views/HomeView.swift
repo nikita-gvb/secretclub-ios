@@ -303,8 +303,8 @@ struct ServerCapsule: View {
             return app.isRefreshing ? ("Загружаем серверы…", "Секунду") : ("Серверы не загружены", "Нажмите, чтобы обновить")
         }
         if app.autoMode {
-            // Видно, через что идёт трафик: обычный сервер, мост для мобильной сети или резерв.
-            if let route { return (route.title, route.group == .regular ? "Авто" : "Авто · \(route.group.shortTitle.lowercased())") }
+            // Видно, через что идёт трафик: обычный сервер, мост или обход белых списков.
+            if let route { return (route.title, route.group == .regular ? "Авто" : "Авто · \(route.group.tag)") }
             return ("Авто", "самый быстрый сервер")
         }
         if let route { return (route.title, route.humanDetail) }

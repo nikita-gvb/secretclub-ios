@@ -49,6 +49,9 @@ final class VPNController {
     @ObservationIgnored private var refreshing = false
     /// Каждый свежий отчёт расширения (сервер мог смениться сам).
     @ObservationIgnored var onReport: (@MainActor (TunnelReport) -> Void)?
+    /// Состояние из общей папки (его же показывают виджеты), когда оно свежее последнего отчёта.
+    @ObservationIgnored var onShared: (@MainActor (SharedStatus) -> Void)?
+    @ObservationIgnored private var lastSharedAt: Date?
 
     static var tunnelBundleID: String {
         (Bundle.main.bundleIdentifier ?? "com.secretclub.app") + ".tunnel"
@@ -425,8 +428,22 @@ final class VPNController {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), observer, { _, observer, _, _, _ in
             guard let observer else { return }
             let controller = Unmanaged<VPNController>.fromOpaque(observer).takeUnretainedValue()
-            Task { @MainActor in await controller.refreshReport() }
+            Task { @MainActor in
+                controller.readShared()
+                await controller.refreshReport()
+            }
         }, TunnelSignal.changed as CFString, nil, .deliverImmediately)
+    }
+
+    /// Состояние, которое расширение пишет в общую папку для виджетов. Сообщения до расширения могут
+    /// не доходить (устаревший профиль VPN), а файл виден всегда — сервер в приложении не «застревает».
+    func readShared() {
+        guard !isDemo, state == .connected || state == .connecting,
+              let status = SharedStatus.load(), status.running else { return }
+        if let at = lastReportAt, at >= status.updatedAt { return }
+        if let seen = lastSharedAt, seen >= status.updatedAt { return }
+        lastSharedAt = status.updatedAt
+        onShared?(status)
     }
 
     /// Свежий отчёт расширения прямо сейчас.
@@ -462,6 +479,8 @@ final class VPNController {
                     self.receive(r)
                 } else {
                     self.pollFailures += 1
+                    // Расширение не отвечает на сообщения, но пишет состояние в общую папку — как для виджета.
+                    self.readShared()
                     // Профиль VPN мог измениться из другого места (виджет, Пункт управления, Настройки iOS) —
                     // старый объект профиля перестаёт доставлять сообщения. Перечитываем.
                     if self.pollFailures == 3 || self.pollFailures % 20 == 0 { await self.reloadManager(reason: "расширение не отвечает") }
@@ -501,6 +520,11 @@ final class VPNController {
                 }
             } else {
                 steps.append(DiagnosticStep(ok: false, text: "Расширение не ответило на запрос статуса"))
+            }
+            if let ms = await NetworkProbe.systemDNS() {
+                steps.append(DiagnosticStep(ok: true, text: "DNS через VPN отвечает, \(ms) мс"))
+            } else {
+                steps.append(DiagnosticStep(ok: false, text: "DNS через VPN не отвечает — откроется только то, что ходит по IP-адресам (например, Telegram)"))
             }
             if let trace = await NetworkProbe.trace() {
                 steps.append(DiagnosticStep(ok: true, text: "Интернет через VPN: IP \(trace.ip)\(trace.location.map { ", \($0)" } ?? ""), \(trace.ms) мс"))

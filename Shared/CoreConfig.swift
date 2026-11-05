@@ -17,6 +17,8 @@ enum CoreConfig {
     static let routeBalancer = "sc-route"
     /// Проверочный вход самого рабочего сервера (в «горячем» режиме health-in идёт через балансировщик).
     static let mainProbeTag = "hcm"
+    /// Проверочный вход DNS: UDP-запрос на него идёт тем же путём, что и DNS-запросы приложений из TUN.
+    static let dnsProbeTag = "dns-probe"
 
     /// Собранный конфиг.
     struct Built {
@@ -29,6 +31,8 @@ enum CoreConfig {
         var main: String?
         /// В конфиге есть балансировщик sc-route — его нужно сразу направить на рабочий сервер.
         var balanced = false
+        /// Есть проверочный вход DNS (dns-probe).
+        var dns = false
         var hot: Bool { balanced && tags.count >= 2 }
     }
     static let serviceProtocols: Set<String> = ["freedom", "blackhole", "dns", "loopback"]
@@ -92,7 +96,7 @@ enum CoreConfig {
     /// чтобы переключаться на запасные без перезапуска. Портов нужно extras.count + 1 (последний — рабочему).
     static func compose(active text: String, fd: Int32, assetDir: String?, healthPort: Int,
                         extras: [(id: String, config: String)], ports: [Int],
-                        activeID: String? = nil, hot: Bool = false) throws -> Built {
+                        activeID: String? = nil, hot: Bool = false, dnsPort: Int = 0) throws -> Built {
         guard var root = object(text) else { throw XrayError(message: "некорректная конфигурация") }
         var env = root["env"] as? [String: Any] ?? [:]
         env["xray.tun.fd"] = String(fd)
@@ -177,8 +181,21 @@ enum CoreConfig {
             root["routing"] = routing
             root["outbounds"] = outbounds
         }
+        // Проверка DNS через ядро: HTTP-проверка сервера идёт по имени сайта, его адрес узнаёт сервер, —
+        // она не видит, что DNS-запросы приложений (dns-out → DNS ядра) не проходят.
+        var dns = false
+        if dnsPort > 0, let dnsTag = outbounds.first(where: { ($0["protocol"] as? String)?.lowercased() == "dns" })?["tag"] as? String,
+           !dnsTag.isEmpty {
+            inbounds.append(["tag": dnsProbeTag, "listen": "127.0.0.1", "port": dnsPort, "protocol": "dokodemo-door",
+                             "settings": ["address": "1.1.1.1", "port": 53, "network": "udp"] as [String: Any]])
+            var routing = root["routing"] as? [String: Any] ?? [:]
+            let rules = routing["rules"] as? [[String: Any]] ?? []
+            routing["rules"] = [["type": "field", "inboundTag": [dnsProbeTag], "outboundTag": dnsTag] as [String: Any]] + rules
+            root["routing"] = routing
+            dns = true
+        }
         root["inbounds"] = inbounds
         guard let result = Self.text(root) else { throw XrayError(message: "не удалось собрать конфигурацию") }
-        return Built(text: result, ports: map, tags: tags, main: mainTag, balanced: balanced)
+        return Built(text: result, ports: map, tags: tags, main: mainTag, balanced: balanced, dns: dns)
     }
 }

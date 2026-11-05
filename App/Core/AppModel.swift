@@ -168,6 +168,7 @@ final class AppModel {
         }
 
         vpn.onReport = { [weak self] report in self?.apply(report) }
+        vpn.onShared = { [weak self] status in self?.apply(shared: status) }
         if !isDemo {
             Reminders.install { [weak self] url in self?.handle(url: url) }
             shareSubscription()
@@ -261,6 +262,8 @@ final class AppModel {
         // VPN могли включить или выключить из виджета, Пункта управления или Настроек iOS —
         // профиль перечитываем, иначе старый объект не получает ответов от расширения.
         await vpn.reloadManager(reason: "возврат в приложение")
+        // Пока приложение было в фоне, сервер мог смениться — сразу показываем то же, что виджет.
+        vpn.readShared()
         vpn.setForeground(true)
         if vpn.state == .connected { Task { await vpn.requestCheck(network: false) } }
         if loginTicket != nil {
@@ -851,22 +854,43 @@ final class AppModel {
     }
 
     /// Сервер из отчёта расширения. Если подписка успела обновиться и id сменился — ищем по названию.
-    private func resolveRoute(_ report: TunnelReport) -> String? {
-        guard let id = report.routeID else { return nil }
+    private func resolveRoute(_ id: String?, title: String?) -> String? {
+        guard let id else { return nil }
         if configs[id] != nil || routes.contains(where: { $0.id == id }) { return id }
-        guard let title = report.routeTitle else { return nil }
+        guard let title else { return nil }
         return routes.first { "\($0.emoji) \($0.title)" == title || $0.remarks == title || $0.title == title }?.id
+    }
+
+    @ObservationIgnored private var unresolvedRoute: String?
+
+    /// Сервер, на котором сейчас VPN (по отчёту расширения или общей папке).
+    private func adoptConnected(_ id: String?, title: String?, source: String) {
+        guard let id else { return }
+        guard let resolved = resolveRoute(id, title: title) else {
+            if unresolvedRoute != id {
+                unresolvedRoute = id
+                DiagLog.warn("VPN на сервере «\(title ?? id)», а в списке приложения его нет", to: .app)
+            }
+            return
+        }
+        guard resolved != connectedRouteID else { return }
+        if connectedRouteID != nil { DiagLog.write("сервер сменился\(source): «\(title ?? id)»", to: .app) }
+        connectedRouteID = resolved
+        defaults.set(resolved, forKey: SettingsKey.connectedRoute)
+        if autoMode { autoRouteID = resolved }
+        WidgetSync.reload()
+    }
+
+    /// Расширение не ответило, но записало состояние для виджетов — показываем то же, что и виджет.
+    private func apply(shared s: SharedStatus) {
+        adoptConnected(s.routeID, title: s.routeTitle, source: " (из общей папки)")
+        if let raw = s.network, let mode = NetworkMode(rawValue: raw), mode != networkMode { networkMode = mode }
+        if let healthy = s.healthy, tunnelHealthy != healthy { tunnelHealthy = healthy }
     }
 
     /// Отчёт расширения: сервер мог смениться сам, плюс свежая проверка сети и сервера.
     private func apply(_ report: TunnelReport) {
-        if let id = resolveRoute(report), id != connectedRouteID {
-            if connectedRouteID != nil { DiagLog.write("сервер сменился: «\(report.routeTitle ?? id)»", to: .app) }
-            connectedRouteID = id
-            defaults.set(id, forKey: SettingsKey.connectedRoute)
-            if autoMode { autoRouteID = id }
-            WidgetSync.reload()
-        }
+        adoptConnected(report.routeID, title: report.routeTitle, source: "")
         if let raw = report.network, let mode = NetworkMode(rawValue: raw), mode != networkMode {
             networkMode = mode
         }
@@ -889,6 +913,8 @@ final class AppModel {
     /// Индикатор в шапке: режим сети, а если VPN включён и сервер не отвечает — об этом.
     var networkChip: (title: String, color: Color) {
         if vpn.state == .connected, tunnelHealthy == false { return ("Сервер не отвечает", Theme.red) }
+        // Сервер отвечает, но имена сайтов не находятся — откроется только то, что ходит по IP (Telegram).
+        if vpn.state == .connected, vpn.report?.dnsOK == false { return ("DNS не отвечает", Theme.orange) }
         return (networkMode.short, networkMode.color)
     }
 
@@ -1002,9 +1028,10 @@ final class AppModel {
         }
     }
 
-    /// Порядок групп для «Авто»: резерв — только если остальное не работает (у него ограничен трафик).
+    /// Порядок групп для «Авто». При белых списках обычные серверы и мосты не открываются — начинаем
+    /// с обхода белых списков. Иначе он последний: у него ограничен трафик.
     private var groupOrder: [RouteGroup] {
-        networkMode == .whitelist ? [.bridge, .reserve] : [.regular, .bridge, .reserve]
+        networkMode == .whitelist ? [.reserve, .bridge] : [.regular, .bridge, .reserve]
     }
 
     private func candidates(_ group: RouteGroup) -> [Route] {
@@ -1437,6 +1464,7 @@ final class AppModel {
             lines.append("Ядро: \(r.coreVersion), работает: \(r.running ? "да" : "нет")\(r.memoryMB.map { ", память \(Int($0)) МБ" } ?? "")\(r.multi == true ? ", проверка запасных: параллельно" : "")")
             if let e = r.error { lines.append("Ошибка ядра: \(e)") }
             if let h = r.healthy { lines.append("Сервер отвечает: \(h ? "да" : "нет")\(r.pingMS.map { ", \($0) мс" } ?? "")") }
+            if let ok = r.dnsOK { lines.append("DNS через VPN (проверка расширения): \(ok ? "отвечает\(r.dnsMS.map { ", \($0) мс" } ?? "")" : "НЕ отвечает")") }
             if let ms = r.lastSwitchMS { lines.append("Последнее переключение: \(String(format: "%.1f", Double(ms) / 1000)) с") }
             if let source = r.counters { lines.append("Счётчики трафика: \(source == "core" ? "ядро" : "интерфейс utun")") }
             if let events = r.events, !events.isEmpty {
@@ -1447,6 +1475,10 @@ final class AppModel {
         if vpn.state == .connected {
             let link = vpn.lastReportAt.map { "ответ \(Int(Date().timeIntervalSince($0))) с назад" } ?? "ответов не было"
             lines.append("Связь с расширением: \(link)\(vpn.pollFailures > 0 ? ", сбоев подряд: \(vpn.pollFailures)" : "")")
+        }
+        if vpn.state == .connected, let shared = SharedStatus.load() {
+            let age = Int(Date().timeIntervalSince(shared.updatedAt))
+            lines.append("Общая папка (как у виджета): «\(shared.routeTitle ?? "—")», \(shared.running ? "включён" : "выключен"), записано \(age) с назад")
         }
         let vpnGroup = vpn.report?.group.map { $0 == AppGroup.identifier ? "та же" : $0 } ?? "неизвестно"
         lines.append("Общая папка: \(AppGroup.identifier ?? "нет"), у VPN: \(vpnGroup); приложение \(Bundle.main.bundleIdentifier ?? "?")")

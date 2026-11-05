@@ -7,30 +7,38 @@ enum RouteGroup: String, CaseIterable, Identifiable, Codable {
     var title: String {
         switch self {
         case .regular: return "Серверы"
-        case .bridge: return "Для мобильной сети"
-        case .reserve: return "Резервное подключение"
+        case .bridge: return "Мосты"
+        case .reserve: return "Обход белых списков"
         }
     }
     var shortTitle: String {
         switch self {
         case .regular: return "Обычный"
-        case .bridge: return "Для мобильной сети"
-        case .reserve: return "Резерв"
+        case .bridge: return "Мост"
+        case .reserve: return "Обход БС"
+        }
+    }
+    /// Пометка в капсуле после «Авто»: «Авто · мост», «Авто · обход БС».
+    var tag: String {
+        switch self {
+        case .regular: return ""
+        case .bridge: return "мост"
+        case .reserve: return "обход БС"
         }
     }
     var subtitle: String {
         switch self {
         case .regular: return "Самые быстрые — для обычного интернета."
-        case .bridge: return "Работают, даже когда мобильный интернет пускает только на российские сайты."
-        case .reserve: return "Включается само, если остальные серверы недоступны. Трафик ограничен — тратится, только пока работает."
+        case .bridge: return "Через промежуточный сервер в России — когда зарубежные серверы не открываются напрямую. При белых списках не помогают."
+        case .reserve: return "Для мобильного интернета с белыми списками, когда открываются только разрешённые сайты. Включается само, если остальное не работает: трафик ограничен."
         }
     }
     /// Что пишем под кнопкой, пока «Авто» перебирает группу.
     var searchPhase: String {
         switch self {
         case .regular: return "Выбираем самый быстрый сервер"
-        case .bridge: return "Пробуем серверы для мобильной сети"
-        case .reserve: return "Пробуем резервное подключение"
+        case .bridge: return "Пробуем мосты"
+        case .reserve: return "Пробуем обход белых списков"
         }
     }
     var icon: String {
@@ -76,13 +84,13 @@ struct Route: Identifiable, Hashable {
         }
     }
 
-    /// Подпись без технических слов: «Быстрый · 5 Гбит/с», «для мобильной сети», «резерв».
+    /// Подпись без технических слов: «Быстрый · 5 Гбит/с», «мост», «обход белых списков».
     var humanDetail: String {
         var parts: [String] = []
         switch group {
         case .regular: parts.append(transport == .hysteria2 ? "Быстрый" : "Устойчивый")
-        case .bridge: parts.append("для мобильной сети")
-        case .reserve: parts.append("резерв")
+        case .bridge: parts.append("мост")
+        case .reserve: parts.append("обход белых списков")
         }
         if let r = detail.range(of: #"\d+ Гбит/с"#, options: .regularExpression) { parts.append(String(detail[r])) }
         return parts.joined(separator: " · ")
@@ -92,7 +100,7 @@ struct Route: Identifiable, Hashable {
         switch group {
         case .regular: return transportTitle
         case .bridge: return "мост · \(transportTitle)"
-        case .reserve: return "резерв"
+        case .reserve: return "обход БС"
         }
     }
 
@@ -109,7 +117,7 @@ struct Route: Identifiable, Hashable {
         switch group {
         case .regular: detail = "\(tt) · напрямую"
         case .bridge: detail = "через Россию · \(tt)"
-        case .reserve: detail = "резервное · через CDN"
+        case .reserve: detail = "обход БС · через CDN"
         }
         return Route(id: id, emoji: code.flagEmoji, title: country, detail: detail, group: group,
                      transport: transport, transportTitle: tt, remarks: country, ping: ping)
@@ -139,7 +147,7 @@ enum NetworkMode: String {
         switch self {
         case .unknown: return "Определяем, какие сайты доступны в этой сети."
         case .normal: return "Открываются и российские, и зарубежные сайты. Используем самый быстрый маршрут."
-        case .whitelist: return "Открываются только некоторые российские сайты. Подключимся через мост или резервное подключение."
+        case .whitelist: return "Открываются только сайты из белого списка. Подключимся через обход белых списков."
         case .offline: return "Не отвечает ни один сайт. Проверьте Wi‑Fi или мобильный интернет."
         }
     }

@@ -248,6 +248,11 @@ extension PacketTunnelProvider {
         failureNoted = false
         throttled = []
         stats = [:]
+        dnsOK = nil
+        dnsRestarted = []
+        dnsBroken = []
+        report.dnsOK = nil
+        report.dnsMS = nil
         if signature == "none" {
             report.network = NetKind.offline.rawValue
             if pendingReason != .start {
@@ -385,7 +390,7 @@ extension PacketTunnelProvider {
         var unprobed = false
         if auto, let pool {
             for c in pool.candidates where c.id != current.id {
-                if throttled.contains(c.id) || (freeze && c.group == "regular") { continue }
+                if throttled.contains(c.id) || dnsBroken.contains(c.id) || (freeze && c.group == "regular") { continue }
                 if let port = extraPorts[c.id] {
                     extras.append(CheckTarget(key: c.id, id: c.id, group: c.group, port: port, active: false))
                 } else {
@@ -394,7 +399,7 @@ extension PacketTunnelProvider {
             }
         }
         // Подозрение на обрыв сначала проверяем лёгким запросом через рабочий сервер; не ответил — всех.
-        let broad: Set<CheckReason> = [.start, .network, .retry]
+        let broad: Set<CheckReason> = [.start, .network, .retry, .dns]
         return CheckContext(reason: reason, auto: auto, activeProbe: probe, activeGroup: activeGroup, extras: extras,
                             broad: auto && broad.contains(reason) && !blip,
                             compare: (reason == .start || reason == .network) && !blip,
@@ -501,8 +506,73 @@ extension PacketTunnelProvider {
                 }
             }
         }
+        if alive { await checkDNS() }
         if alive, ctx.reason == .start || ctx.reason == .network {
             await checkPayloadIfNeeded()
+        }
+    }
+
+    /// DNS через ядро. Приложениям сначала нужно узнать адрес сайта: если этот путь сломан, работает только
+    /// то, что ходит по IP-адресам (Telegram), а проверка сервера (HTTP по имени сайта) проходит.
+    /// Не ответил — один раз перезапускаем ядро (свежие соединения DNS); не помогло — в «Авто» уходим
+    /// на другой сервер. Всё — не чаще раза на сервер в этой сети, поэтому без бесконечных перезапусков.
+    func checkDNS(again: Bool = false) async {
+        let plan = await onWork { () -> (port: Int, id: String, title: String, launched: Date?)? in
+            guard self.report.running, !self.stopped, self.dnsReady, self.dnsPort > 0, let current = self.active,
+                  self.pathSignature != "none" else { return nil }
+            let id = current.id ?? ""
+            if !again, let ok = self.dnsOK, ok.route == id, ok.launched == self.launchedAt,
+               Date().timeIntervalSince(ok.at) < 30 { return nil }
+            return (self.dnsPort, id, current.title ?? id, self.launchedAt)
+        }
+        guard let plan else { return }
+        // Первый запрос после запуска ядра ждёт ещё и соединения DNS через сервер — даём второй шанс.
+        var ms = await DNSProbe.viaCore(port: plan.port, timeout: 5)
+        if ms == nil, !Task.isCancelled { ms = await DNSProbe.viaCore(port: plan.port, timeout: 4) }
+        let repeatCheck = await onWork { () -> Bool in
+            // Пока проверяли, сменился сервер или ядро перезапустили — результат ни о чём не говорит.
+            guard self.report.running, (self.active?.id ?? "") == plan.id, self.launchedAt == plan.launched else { return false }
+            if let ms {
+                if self.report.dnsOK != true || again { self.event("DNS через «\(plan.title)»: ок, \(ms) мс") }
+                self.report.dnsOK = true
+                self.report.dnsMS = ms
+                self.dnsOK = (plan.id, plan.launched, Date())
+                self.dnsBroken.remove(plan.id)
+                return false
+            }
+            let changed = self.report.dnsOK != false
+            self.report.dnsOK = false
+            self.report.dnsMS = nil
+            self.dnsOK = nil
+            defer { if changed { self.publishStatus(); TunnelSignal.post() } }
+            if self.evaluating { return false }
+            if !self.dnsRestarted.contains(plan.id), let current = self.active {
+                self.dnsRestarted.insert(plan.id)
+                self.event("DNS через «\(plan.title)» не отвечает (откроется только то, что ходит по IP, вроде Telegram) — перезапуск ядра")
+                do {
+                    try self.launch(current)
+                    return true
+                } catch {
+                    self.report.error = error.localizedDescription
+                    self.scheduleRetry()
+                    return false
+                }
+            }
+            guard !self.dnsBroken.contains(plan.id) else { return false }
+            self.dnsBroken.insert(plan.id)
+            let others = (self.pool?.candidates ?? []).contains { $0.id != plan.id && !self.dnsBroken.contains($0.id) }
+            if self.pool?.auto == true, others {
+                self.event("DNS через «\(plan.title)» не отвечает и после перезапуска — ищем другой сервер")
+                self.scheduleCheck(.dns, delay: 0)
+            } else {
+                self.event("DNS через «\(plan.title)» не отвечает и после перезапуска")
+                self.post("Через «\(plan.title)» не открываются сайты — попробуйте другой сервер")
+            }
+            return false
+        }
+        if repeatCheck {
+            try? await Task.sleep(nanoseconds: 700_000_000)
+            await checkDNS(again: true)
         }
     }
 
@@ -595,7 +665,8 @@ extension PacketTunnelProvider {
         let freeze = ctx.freeze || regularFrozenCount >= 2
 
         let usable = pool.candidates.filter { c in
-            s.ok[c.id] != nil && c.id != activeID && !throttled.contains(c.id) && !(freeze && c.group == "regular")
+            s.ok[c.id] != nil && c.id != activeID && !throttled.contains(c.id) && !dnsBroken.contains(c.id)
+                && !(freeze && c.group == "regular")
         }
         let ranked = usable.sorted { a, b in
             let ra = AutoPool.rank(a.group), rb = AutoPool.rank(b.group)
@@ -604,7 +675,8 @@ extension PacketTunnelProvider {
                 < score(b.id, load: b.load, ms: s.ok[b.id] ?? 9999, preferred: ctx.preferred)
         }
         // «Рабочий жив, но в этой сети замирает» — ищем другой, но если других нет, остаёмся.
-        let activeGood = alive && !(activeID.map { throttled.contains($0) } ?? false)
+        // Через рабочий не проходят DNS-запросы — для приложений он мёртв, хоть проверка и отвечает.
+        let activeGood = alive && !(activeID.map { throttled.contains($0) || dnsBroken.contains($0) } ?? false)
             && !(freeze && ctx.activeGroup == "regular")
         if !activeGood { return Decision(targets: AutoPool.diverse(ranked), activeAlive: alive) }
         guard let best = ranked.first else { return Decision(targets: [], activeAlive: true) }
@@ -645,8 +717,11 @@ extension PacketTunnelProvider {
         // Уходим с «замершего» сервера — новый обычный проверяем и объёмом, иначе он замрёт так же.
         let plan = await onWork { () -> (verify: Bool, hot: Bool, original: Active?) in
             let activeThrottled = (self.active?.id).map { self.throttled.contains($0) } == true
+            // С сервера, через который не шёл DNS, уходим перезапуском: DNS ядра держит соединения через него.
+            let activeDNS = (self.active?.id).map { self.dnsBroken.contains($0) } == true
             let verify = ctx.reason == .stall && activeThrottled
-            let hot = restoreAlive && !activeThrottled && !(ctx.freeze && ctx.activeGroup == "regular") && !self.routeTags.isEmpty
+            let hot = restoreAlive && !activeThrottled && !activeDNS && !(ctx.freeze && ctx.activeGroup == "regular")
+                && !self.routeTags.isEmpty
             if !hot, self.startCompletion == nil { self.reasserting = true }
             return (verify, hot, self.active)
         }
@@ -696,7 +771,9 @@ extension PacketTunnelProvider {
     /// Запасной путь без общего конфига: кандидаты по задержке до сервера, каждый — перезапуск ядра.
     private func sequential(_ ctx: CheckContext) async -> (AutoCandidate, Int)? {
         let list = await onWork { () -> [AutoCandidate] in
-            (self.pool?.candidates ?? []).filter { $0.id != self.active?.id && !self.throttled.contains($0.id) }
+            (self.pool?.candidates ?? []).filter {
+                $0.id != self.active?.id && !self.throttled.contains($0.id) && !self.dnsBroken.contains($0.id)
+            }
         }
         guard !list.isEmpty else { return nil }
         let pings = await LatencyProbe.direct(list.compactMap(\.target), timeout: 2)
@@ -777,6 +854,8 @@ extension PacketTunnelProvider {
                 let old = pool?.candidates.first { $0.id == ctx.activeProbe.id }?.title ?? "Сервер"
                 if ctx.reason == .network {
                     post("Сеть сменилась — подключили «\(candidate.title)»\(kind)")
+                } else if ctx.reason == .dns {
+                    post("Через «\(old)» не открывались сайты — подключили «\(candidate.title)»\(kind)")
                 } else if survey.activeChecked && survey.activeMS == nil {
                     post("«\(old)» перестал отвечать — подключили «\(candidate.title)»\(kind)")
                 } else {
@@ -812,8 +891,8 @@ extension PacketTunnelProvider {
 
     static func groupTitle(_ group: String) -> String {
         switch group {
-        case "bridge": return " (для мобильной сети)"
-        case "reserve": return " (резерв)"
+        case "bridge": return " (мост)"
+        case "reserve": return " (обход белых списков)"
         default: return ""
         }
     }

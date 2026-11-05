@@ -133,9 +133,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             self.noteUncleanExit()
             self.sessionStart = Date()
             self.peakMB = Self.footprintMB ?? 0
+            self.report.group = AppGroup.identifier ?? "нет"
             self.touchSession(force: true, route: routeTitle)
             DiagLog.write("включение VPN (\(byApp ? "из приложения" : "без приложения: виджет, команда или автоподключение")), "
-                          + "«\(routeTitle ?? "?")», ядро \(XrayEngine.version), iOS \(ProcessInfo.processInfo.operatingSystemVersionString)",
+                          + "«\(routeTitle ?? "?")», ядро \(XrayEngine.version), iOS \(ProcessInfo.processInfo.operatingSystemVersionString), "
+                          + "сборка \(Self.build), общая папка: \(AppGroup.identifier ?? "нет")",
                           to: .tunnel)
         }
 

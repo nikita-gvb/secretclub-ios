@@ -138,7 +138,11 @@ struct DiagnosticsData {
         }
         if let report = await vpn.fetchTunnelLog() {
             data.tunnelReport = report
-            if !shared { data.tunnelLog = report.logTail ?? "" }
+            // Нет общей папки или расширение пишет не в неё (сервис переподписи не дал ему ту же группу) —
+            // берём журнал прямо у расширения.
+            if !shared || data.tunnelLog.isEmpty || report.group != AppGroup.identifier {
+                data.tunnelLog = report.logTail ?? data.tunnelLog
+            }
             for item in report.incidents ?? [] where !incidents.contains(where: { $0.id == item.id }) { incidents.append(item) }
         } else if !shared {
             data.tunnelLogMissing = true

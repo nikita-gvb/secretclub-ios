@@ -127,6 +127,8 @@ struct TunnelReport: Codable, Equatable {
     var hot: Bool? = nil
     /// Ответ на команду log: конец журнала расширения (когда нет общей папки с приложением).
     var logTail: String? = nil
+    /// Общая папка, которую видит расширение (nil — старое расширение, «нет» — не видит).
+    var group: String? = nil
     /// Ответ на команду log: сбои, которые заметило само расширение.
     var incidents: [Incident]? = nil
 }

@@ -28,10 +28,25 @@ enum AppGroup {
         return url
     }
 
-    /// Группы из embedded.mobileprovision: внутри CMS-контейнера лежит обычный plist.
+    /// Группы из embedded.mobileprovision: свой профиль, а у расширения — ещё и профиль приложения
+    /// (сервис переподписи часто кладёт профиль только в приложение, а права группы даёт и расширениям).
     private static func provisionedGroups() -> [String] {
-        guard let url = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision"),
-              let data = try? Data(contentsOf: url),
+        var urls: [URL] = []
+        if let own = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision") { urls.append(own) }
+        let bundle = Bundle.main.bundleURL
+        if bundle.pathExtension == "appex" {
+            urls.append(bundle.deletingLastPathComponent().deletingLastPathComponent()
+                .appendingPathComponent("embedded.mobileprovision"))
+        }
+        var out: [String] = []
+        for url in urls {
+            for group in groups(in: url) where !out.contains(group) { out.append(group) }
+        }
+        return out
+    }
+
+    private static func groups(in url: URL) -> [String] {
+        guard let data = try? Data(contentsOf: url),
               let start = data.range(of: Data("<?xml".utf8)),
               let end = data.range(of: Data("</plist>".utf8), in: start.lowerBound..<data.endIndex),
               let plist = try? PropertyListSerialization.propertyList(from: data.subdata(in: start.lowerBound..<end.upperBound),

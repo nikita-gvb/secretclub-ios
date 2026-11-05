@@ -254,8 +254,14 @@ final class AppModel {
     private var energySaver: Bool { defaults.object(forKey: SettingsKey.energySaver) as? Bool ?? true }
 
     func becameActive() async {
+        guard !isDemo else {
+            vpn.setForeground(true)
+            return
+        }
+        // VPN могли включить или выключить из виджета, Пункта управления или Настроек iOS —
+        // профиль перечитываем, иначе старый объект не получает ответов от расширения.
+        await vpn.reloadManager(reason: "возврат в приложение")
         vpn.setForeground(true)
-        guard !isDemo else { return }
         if vpn.state == .connected { Task { await vpn.requestCheck(network: false) } }
         if loginTicket != nil {
             pollNow()
@@ -345,13 +351,12 @@ final class AppModel {
         await storeForBackgroundStart()
     }
 
-    /// VPN выключен: кладём в профиль свежий сервер и запасные — их возьмёт расширение, если VPN
+    /// VPN выключен: кладём в профиль свежий сервер — его возьмёт расширение, если VPN
     /// включат из виджета, Пункта управления, Настроек iOS или он поднимется сам.
     private func storeForBackgroundStart() async {
         guard !isDemo, vpn.hasProfile, !vpn.isActive, !routes.isEmpty else { return }
         let route = autoMode ? initialAutoRoute() : routes.first { $0.id == selectedRouteID }
-        guard let route, var req = request(for: route) else { return }
-        req.pool = TunnelCoding.encode(makePool()).map { String(decoding: $0, as: UTF8.self) }
+        guard let route, let req = request(for: route) else { return }
         await vpn.store(req)
     }
 
@@ -1443,6 +1448,8 @@ final class AppModel {
             let link = vpn.lastReportAt.map { "ответ \(Int(Date().timeIntervalSince($0))) с назад" } ?? "ответов не было"
             lines.append("Связь с расширением: \(link)\(vpn.pollFailures > 0 ? ", сбоев подряд: \(vpn.pollFailures)" : "")")
         }
+        let vpnGroup = vpn.report?.group.map { $0 == AppGroup.identifier ? "та же" : $0 } ?? "неизвестно"
+        lines.append("Общая папка: \(AppGroup.identifier ?? "нет"), у VPN: \(vpnGroup); приложение \(Bundle.main.bundleIdentifier ?? "?")")
         if let route = activeRoute { lines.append("Маршрут: \(route.remarks) [\(route.group.rawValue), \(route.transportTitle)]") }
         lines.append("Режим: \(autoMode ? "Авто" : "вручную"), способ: \(TransportPreference(rawValue: defaults.string(forKey: SettingsKey.transport) ?? "")?.title ?? "Авто")")
         lines.append("Серверов: \(routes.count), подписка: \(subscription.plan), \(subscription.status.title)")

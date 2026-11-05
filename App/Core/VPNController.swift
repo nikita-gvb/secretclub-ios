@@ -134,6 +134,33 @@ final class VPNController {
         }
     }
 
+    /// Перечитать профиль VPN из настроек iOS: берём тот, что сейчас включён или подключается.
+    func reloadManager(reason: String) async {
+        // Посреди подключения не трогаем: объект профиля держит само подключение.
+        guard !isDemo, !isBusy else { return }
+        do {
+            let managers = try await NETunnelProviderManager.loadAllFromPreferences()
+            let live = managers.first {
+                let status = $0.connection.status
+                return status == .connected || status == .connecting || status == .reasserting
+            }
+            let mine = live ?? managers.first {
+                ($0.protocolConfiguration as? NETunnelProviderProtocol)?.providerBundleIdentifier == Self.tunnelBundleID
+            } ?? managers.first
+            guard let m = mine else { return }
+            let changed = manager.map { $0 !== m } ?? true
+            manager = m
+            observe(m)
+            update(m.connection.status)
+            if pollFailures >= 3 {
+                DiagLog.warn("\(reason) (\(pollFailures) запросов) — профиль VPN перечитан, профилей: \(managers.count)", to: .app)
+            }
+            if changed, state == .connected, foreground { await refreshReport() }
+        } catch {
+            DiagLog.warn("профиль VPN не перечитан: \(Self.describe(error))", to: .app)
+        }
+    }
+
     // MARK: - Подключение
 
     /// Пока приложение выбирает сервер — показываем «подключаемся».
@@ -167,7 +194,7 @@ final class VPNController {
         m.protocolConfiguration = proto
         m.localizedDescription = "SecretClub"
         m.isEnabled = true
-        try await m.saveToPreferences()
+        try await Self.saveRecovering(m, request)
         try await m.loadFromPreferences()
         manager = m
         observe(m)
@@ -175,28 +202,46 @@ final class VPNController {
     }
 
     /// Что расширение возьмёт из профиля, если VPN включат без приложения (виджет, Пункт управления,
-    /// Настройки iOS, автоподключение): сервер и список запасных.
+    /// Настройки iOS, автоподключение): сервер. Список запасных сюда НЕ кладём: он весит сотни КБ,
+    /// и iOS отвергает такой профиль («некорректная конфигурация VPN») — запасные расширение хранит само.
     private static func stored(_ request: ConnectRequest) -> [String: Any] {
-        var conf: [String: Any] = [
+        [
             TunnelOption.config: request.config,
             TunnelOption.routeID: request.routeID,
             TunnelOption.routeTitle: request.routeTitle,
+            Self.digestKey: digest(request),
         ]
-        if let pool = request.pool { conf[TunnelOption.pool] = pool }
-        conf[Self.digestKey] = digest(request)
-        return conf
     }
 
     private static let digestKey = "digest"
 
-    /// Отпечаток настроек без времени сборки списка — чтобы не переписывать профиль VPN зря.
+    /// Отпечаток настроек — чтобы не переписывать профиль VPN зря.
     private static func digest(_ request: ConnectRequest) -> String {
-        var text = request.config + "|" + request.routeID
-        if let pool = request.pool, var decoded = TunnelCoding.decode(AutoPool.self, Data(pool.utf8)) {
-            decoded.updatedAt = nil
-            if let data = TunnelCoding.encode(decoded) { text += "|" + String(decoding: data, as: UTF8.self) }
+        AppModel.digest(request.config + "|" + request.routeID)
+    }
+
+    /// Профиль не сохранился как «некорректный» — сохраняем только самое нужное (сервер), без лишнего.
+    private static func saveRecovering(_ m: NETunnelProviderManager, _ request: ConnectRequest?) async throws {
+        do {
+            try await m.saveToPreferences()
+        } catch let error as NSError where error.domain == NEVPNErrorDomain
+            && error.code == NEVPNError.Code.configurationInvalid.rawValue {
+            guard let proto = m.protocolConfiguration as? NETunnelProviderProtocol else { throw error }
+            DiagLog.warn("профиль VPN отклонён iOS как некорректный — сохраняем заново, только сервер", to: .app)
+            proto.providerBundleIdentifier = tunnelBundleID
+            if let request {
+                proto.providerConfiguration = [
+                    TunnelOption.config: request.config,
+                    TunnelOption.routeID: request.routeID,
+                    TunnelOption.routeTitle: request.routeTitle,
+                ]
+            } else {
+                proto.providerConfiguration = nil
+            }
+            if proto.serverAddress?.isEmpty ?? true { proto.serverAddress = "SecretClub" }
+            m.protocolConfiguration = proto
+            try await m.saveToPreferences()
         }
-        return AppModel.digest(text)
     }
 
     /// Профиль VPN уже создан (подключались хотя бы раз).
@@ -213,7 +258,7 @@ final class VPNController {
         proto.serverAddress = request.routeTitle
         m.protocolConfiguration = proto
         do {
-            try await m.saveToPreferences()
+            try await Self.saveRecovering(m, request)
             DiagLog.write("профиль VPN: обновлены сервер «\(request.routeTitle)» и запасные для запуска без приложения", to: .app)
         } catch {
             DiagLog.warn("профиль VPN не обновлён: \(Self.describe(error))", to: .app)
@@ -417,6 +462,9 @@ final class VPNController {
                     self.receive(r)
                 } else {
                     self.pollFailures += 1
+                    // Профиль VPN мог измениться из другого места (виджет, Пункт управления, Настройки iOS) —
+                    // старый объект профиля перестаёт доставлять сообщения. Перечитываем.
+                    if self.pollFailures == 3 || self.pollFailures % 20 == 0 { await self.reloadManager(reason: "расширение не отвечает") }
                 }
                 try? await Task.sleep(for: .seconds(1))
             }
@@ -553,6 +601,8 @@ final class VPNController {
     /// Журнал и сбои расширения — когда у приложения и расширения нет общей папки (App Group).
     func fetchTunnelLog() async -> TunnelReport? {
         guard !isDemo, state == .connected || state == .connecting else { return nil }
+        if let report = await send(TunnelCommand(kind: .log), attempts: 1, timeout: 4) { return report }
+        await reloadManager(reason: "расширение не отдало журнал")
         return await send(TunnelCommand(kind: .log), attempts: 1, timeout: 4)
     }
 

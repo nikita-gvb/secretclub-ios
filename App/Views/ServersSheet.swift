@@ -178,7 +178,10 @@ struct ServersSheet: View {
     }
 
     private var autoSubtitle: String {
-        if app.autoMode, live, let route = app.displayRoute { return "Сейчас: \(route.emoji) \(route.title)" }
+        if app.autoMode, live, let route = app.displayRoute {
+            let kind = route.group == .regular ? "" : " · \(route.group.shortTitle.lowercased())"
+            return "Сейчас: \(route.emoji) \(route.title)\(kind)"
+        }
         return "Выберем самый быстрый и сами сменим, если что-то пойдёт не так"
     }
 

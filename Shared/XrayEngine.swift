@@ -1,11 +1,6 @@
 import Foundation
 import LibXray
 
-struct XrayError: LocalizedError {
-    let message: String
-    var errorDescription: String? { message }
-}
-
 /// Обёртка над libXray (CGoInvoke, API v3). Используется и приложением (пинг, проверка
 /// конфигурации), и расширением (запуск ядра).
 enum XrayEngine {
@@ -70,6 +65,20 @@ enum XrayEngine {
             return Int64(SecretClubCounter(input))
         }
         return value >= 0 ? value : nil
+    }
+
+    /// Направить трафик балансировщика на outbound с этим тегом (наша сборка libXray).
+    /// Смена сервера без перезапуска ядра: соединения через прежний сервер доживают своё, новые идут через новый.
+    static func setBalancerTarget(_ balancer: String, _ target: String) -> Bool {
+        balancer.withCString { b in
+            target.withCString { t in
+                guard let bb = strdup(b) else { return false }
+                defer { free(bb) }
+                guard let tt = strdup(t) else { return false }
+                defer { free(tt) }
+                return SecretClubSetBalancerTarget(bb, tt) == 1
+            }
+        }
     }
 
     static func runSync(_ config: String) throws {

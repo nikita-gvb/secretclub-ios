@@ -57,6 +57,10 @@ struct CheckView: View {
                         Text("Отправить отчёт в поддержку")
                     }
                     .buttonStyle(.scSecondary)
+                    NavigationLink(value: SettingsRoute.diagnostics) {
+                        Text("Журналы и сбои")
+                    }
+                    .buttonStyle(.scSecondary)
                 }
             } footer: {
                 Text("В отчёте — технические подробности для поддержки. Личные данные и история сайтов не отправляются.")

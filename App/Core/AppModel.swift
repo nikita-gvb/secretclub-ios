@@ -73,6 +73,8 @@ final class AppModel {
     /// Стек «Настроек» и шторка серверов — чтобы открывать их из любого места.
     var settingsPath: [SettingsRoute] = []
     var showServers = false
+    /// Сбоев за 7 дней (MetricKit и аварийные завершения VPN) — для строки «Диагностика».
+    var recentIncidents = 0
 
     @ObservationIgnored private var configs: [String: [String: Any]] = [:]
     @ObservationIgnored private var primaryParsed: ParsedSubscription?
@@ -163,7 +165,8 @@ final class AppModel {
         case "settings": selectedTab = .settings
         case "subscription": selectedTab = .settings; settingsPath = [.subscription]
         case "devices": selectedTab = .settings; settingsPath = [.devices]
-        case "check", "diagnostics": selectedTab = .settings; settingsPath = [.check]
+        case "check": selectedTab = .settings; settingsPath = [.check]
+        case "diagnostics": selectedTab = .settings; settingsPath = [.diagnostics]
         case "appearance": selectedTab = .settings; settingsPath = [.appearance]
         case "advanced": selectedTab = .settings; settingsPath = [.advanced]
         case "exceptions": selectedTab = .settings; settingsPath = [.exceptions]
@@ -221,6 +224,10 @@ final class AppModel {
 
     func start() async {
         guard !isDemo else { return }
+        MetricsCollector.shared.start()
+        AppGroup.defaults?.set(defaults.bool(forKey: SettingsKey.autoConnect), forKey: SharedKey.autoConnect)
+        DiagLog.write("запуск приложения \(Config.version), iOS \(UIDevice.current.systemVersion), общая папка: \(AppGroup.identifier ?? "нет")", to: .app)
+        recentIncidents = await Task.detached { Incidents.recent().count }.value
         await vpn.load()
         startPathMonitor()
         if let reportRoute = vpn.report?.routeID { connectedRouteID = reportRoute }
@@ -484,6 +491,24 @@ final class AppModel {
             pollNow()
             return
         }
+        // Ссылки из виджетов.
+        if url.scheme == "secretclub", let host = url.host {
+            switch host {
+            case "home":
+                selectedTab = .home
+                return
+            case "diagnostics":
+                selectedTab = .settings
+                settingsPath = [.diagnostics]
+                return
+            case "servers":
+                selectedTab = .home
+                showServers = true
+                return
+            default:
+                break
+            }
+        }
         Task {
             if let error = await login(with: url.absoluteString) { refreshError = error }
         }
@@ -736,9 +761,11 @@ final class AppModel {
     /// Отчёт расширения: сервер мог смениться сам, плюс свежая проверка сети и сервера.
     private func apply(_ report: TunnelReport) {
         if let id = resolveRoute(report), id != connectedRouteID {
+            if connectedRouteID != nil { DiagLog.write("сервер сменился: «\(report.routeTitle ?? id)»", to: .app) }
             connectedRouteID = id
             defaults.set(id, forKey: SettingsKey.connectedRoute)
             if autoMode { autoRouteID = id }
+            WidgetSync.reload()
         }
         if let raw = report.network, let mode = NetworkMode(rawValue: raw), mode != networkMode {
             networkMode = mode
@@ -1183,6 +1210,8 @@ final class AppModel {
     }
 
     func autoConnectChanged(_ enabled: Bool) {
+        AppGroup.defaults?.set(enabled, forKey: SharedKey.autoConnect)
+        DiagLog.write("«Подключаться само»: \(enabled ? "вкл" : "выкл")", to: .app)
         Task { await vpn.setOnDemand(enabled) }
     }
 

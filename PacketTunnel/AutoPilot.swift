@@ -250,6 +250,8 @@ extension PacketTunnelProvider {
     /// Пока трафика нет, тикает реже (10 → 30 с) — меньше пробуждений; во сне не тикает вовсе.
     func watchdogTick() {
         updateCounters()
+        trackMemory()
+        touchSession()
         let up = report.uplink - lastTraffic.up
         let down = report.downlink - lastTraffic.down
         let fromServer = serverDown - lastTraffic.server
@@ -446,8 +448,10 @@ extension PacketTunnelProvider {
             Task {
                 let kind = await kindTask.value
                 await self.onWork {
+                    if self.report.network != kind.rawValue { DiagLog.write("режим сети: \(kind.rawValue)", to: .tunnel) }
                     self.report.network = kind.rawValue
                     self.memory.update(self.memoryKey) { $0.kind = kind.rawValue }
+                    self.publishStatus()
                 }
             }
         }
@@ -556,7 +560,7 @@ extension PacketTunnelProvider {
         // «Рабочий жив, но в этой сети замирает» — ищем другой, но если других нет, остаёмся.
         let activeGood = alive && !(activeID.map { throttled.contains($0) } ?? false)
             && !(freeze && ctx.activeGroup == "regular")
-        if !activeGood { return Decision(targets: Self.diverse(ranked), activeAlive: alive) }
+        if !activeGood { return Decision(targets: AutoPool.diverse(ranked), activeAlive: alive) }
         guard let best = ranked.first else { return Decision(targets: [], activeAlive: true) }
         let activeRank = AutoPool.rank(ctx.activeGroup)
         if AutoPool.rank(best.group) < activeRank {
@@ -571,20 +575,6 @@ extension PacketTunnelProvider {
             if theirs < mine * 0.7 && mine - theirs >= 60 { return Decision(targets: [best], activeAlive: true) }
         }
         return Decision(targets: [], activeAlive: true)
-    }
-
-    /// Порядок попыток: до двух лучших из каждой группы (обычные → мосты → резерв), всего до 4 —
-    /// чтобы при «общей» беде группы (замирание, белый список) следующим шёл сервер другого типа.
-    static func diverse(_ ranked: [AutoCandidate]) -> [AutoCandidate] {
-        var counts: [String: Int] = [:]
-        var out: [AutoCandidate] = []
-        for c in ranked where out.count < 4 {
-            let n = counts[c.group, default: 0]
-            guard n < 2 else { continue }
-            counts[c.group] = n + 1
-            out.append(c)
-        }
-        return out
     }
 
     /// Сколько обычных серверов «замерло» в этой сети. На очереди work.
@@ -602,36 +592,43 @@ extension PacketTunnelProvider {
         return value
     }
 
-    /// Переключение: один перезапуск ядра и короткая проверка. Не вышло ни с кем — возвращаем прежний.
+    /// Переключение и короткая проверка. Рабочий сервер жив (переходим на лучший) — без перезапуска ядра,
+    /// VPN не моргает. Рабочий умер или «замирает» — перезапуском: зависшие соединения сбрасываются,
+    /// и приложения сразу переподключаются. Не вышло ни с кем — возвращаем прежний.
     private func switchTo(_ targets: [AutoCandidate], ctx: CheckContext, restoreAlive: Bool) async -> (AutoCandidate, Int)? {
         // Уходим с «замершего» сервера — новый обычный проверяем и объёмом, иначе он замрёт так же.
-        let verify = await onWork { () -> Bool in
-            ctx.reason == .stall && (self.active?.id).map { self.throttled.contains($0) } == true
+        let plan = await onWork { () -> (verify: Bool, hot: Bool, original: Active?) in
+            let activeThrottled = (self.active?.id).map { self.throttled.contains($0) } == true
+            let verify = ctx.reason == .stall && activeThrottled
+            let hot = restoreAlive && !activeThrottled && !(ctx.freeze && ctx.activeGroup == "regular") && !self.routeTags.isEmpty
+            if !hot, self.startCompletion == nil { self.reasserting = true }
+            return (verify, hot, self.active)
         }
-        let original = await onWork { () -> Active? in
-            if self.startCompletion == nil { self.reasserting = true }
-            return self.active
-        }
+        let original = plan.original
         var found: (AutoCandidate, Int)?
         for candidate in targets {
-            let started = await onWork { () -> Bool in
+            let target = Active(id: candidate.id, title: candidate.title, config: candidate.config)
+            let mode = await onWork { () -> String? in
+                if plan.hot, self.hotSwitch(target) { return "hot" }
+                if self.startCompletion == nil { self.reasserting = true }
                 do {
-                    try self.launch(Active(id: candidate.id, title: candidate.title, config: candidate.config))
-                    return true
+                    try self.launch(target)
+                    return "restart"
                 } catch {
                     self.report.error = error.localizedDescription
-                    return false
+                    return nil
                 }
             }
-            guard started else { continue }
-            try? await Task.sleep(nanoseconds: 150_000_000)
+            guard let mode else { continue }
+            if mode == "restart" { try? await Task.sleep(nanoseconds: 150_000_000) }
             if let ms = await LatencyProbe.viaProxy(port: ctx.activeProbe.port, timeout: 3) {
-                if verify, candidate.group == "regular",
+                if plan.verify, candidate.group == "regular",
                    case .stalled(let bytes) = await LatencyProbe.payload(port: ctx.activeProbe.port) {
                     await onWork { self.markFrozen(candidate.id, bytes: bytes) }
                     continue
                 }
                 found = (candidate, ms)
+                if mode == "hot" { await onWork { self.event("«\(candidate.title)»: без перезапуска ядра") } }
                 break
             }
             await onWork { self.stats[candidate.id, default: CandidateStat()].fail() }
@@ -639,7 +636,11 @@ extension PacketTunnelProvider {
         let result = found
         await onWork {
             if result == nil, let original {
-                if (try? self.launch(original)) == nil { self.report.error = "не удалось вернуть прежний сервер" }
+                let back = self.active?.id == original.id && self.report.running
+                if !back, !self.hotSwitch(original), (try? self.launch(original)) == nil {
+                    self.report.error = "не удалось вернуть прежний сервер"
+                    DiagLog.warn("не удалось вернуть прежний сервер «\(original.title ?? "?")»", to: .tunnel)
+                }
             }
             self.reasserting = false
         }
@@ -759,6 +760,7 @@ extension PacketTunnelProvider {
         evaluating = false
         report.checking = false
         finishStart()
+        publishStatus()
         TunnelSignal.post()
     }
 

@@ -70,21 +70,19 @@ jobs:
           echo "UDID=$UDID" >> "$GITHUB_ENV"
           xcrun simctl list devices available | grep "$UDID"
 
-      - name: Build for simulator
+      # Сборка для симулятора + юнит-тесты (CoreConfig, журналы, модели). Скриншоты больше не снимаем.
+      - name: Build and test (simulator)
         run: |
           mkdir -p build
           if ! xcodebuild -project SecretClub.xcodeproj -scheme SecretClub -configuration Debug \
                -destination "platform=iOS Simulator,id=$UDID" -derivedDataPath build/sim \
-               CODE_SIGNING_ALLOWED=NO build > build/sim.log 2>&1; then
-            grep -E "error:|fatal|BUILD FAILED" build/sim.log | head -80
+               CODE_SIGNING_ALLOWED=NO test > build/sim.log 2>&1; then
+            grep -E "error:|fatal|BUILD FAILED|TEST FAILED|failed \(|XCTAssert" build/sim.log | head -80
             exit 1
           fi
           grep -E "warning:" build/sim.log | grep -v "^ld:" | sort -u | head -40 || true
-          echo "Simulator build OK"
-
-      - name: Screenshots
-        run: |
-          ./scripts/screenshots.sh build/sim/Build/Products/Debug-iphonesimulator/SecretClub.app "$UDID" shots
+          grep -E "Executed [0-9]+ tests?" build/sim.log | tail -1
+          echo "Simulator build + tests OK"
 
       - name: Build unsigned IPA
         run: |
@@ -95,21 +93,18 @@ jobs:
             exit 1
           fi
           APP=build/dev/Build/Products/Release-iphoneos/SecretClub.app
-          xcrun strip -Sx "$APP/SecretClub" "$APP/PlugIns/PacketTunnel.appex/PacketTunnel" || true
-          ls -la "$APP" "$APP/PlugIns/PacketTunnel.appex"
-          # ad-hoc подпись с entitlements, чтобы сервисы переподписи видели нужные права (Network Extension)
+          xcrun strip -Sx "$APP/SecretClub" "$APP/PlugIns/PacketTunnel.appex/PacketTunnel" \
+            "$APP/PlugIns/SecretClubWidgets.appex/SecretClubWidgets" || true
+          ls -la "$APP" "$APP/PlugIns/PacketTunnel.appex" "$APP/PlugIns/SecretClubWidgets.appex"
+          # ad-hoc подпись с entitlements, чтобы сервисы переподписи видели нужные права
+          # (Network Extension и общая папка App Group для виджетов и журналов)
           codesign --force --sign - --entitlements Support/PacketTunnel.entitlements "$APP/PlugIns/PacketTunnel.appex"
+          codesign --force --sign - --entitlements Support/SecretClubWidgets.entitlements "$APP/PlugIns/SecretClubWidgets.appex"
           codesign --force --sign - --entitlements Support/SecretClub.entitlements "$APP"
           rm -rf ipa && mkdir -p ipa/Payload && cp -R "$APP" ipa/Payload/
           (cd ipa && zip -qry ../SecretClub-unsigned.ipa Payload)
           ls -la SecretClub-unsigned.ipa
           codesign -d --entitlements - "$APP/PlugIns/PacketTunnel.appex" 2>/dev/null | tail -5 || true
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: screenshots
-          path: shots/*.png
-          if-no-files-found: warn
 
       - uses: actions/upload-artifact@v4
         with:

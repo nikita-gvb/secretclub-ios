@@ -44,5 +44,5 @@ jobs:
       - name: Check
         run: |
           cat Vendor/LibXray.xcframework/SECRETCLUB
-          grep -h "SecretClubCounter" Vendor/LibXray.xcframework/*/Headers/libXray.h
+          grep -h "SecretClubCounter\|SecretClubSetBalancerTarget" Vendor/LibXray.xcframework/*/Headers/libXray.h
           for a in $(find Vendor/LibXray.xcframework -name libXray.a); do lipo -info "$a"; done

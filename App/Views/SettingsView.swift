@@ -2,7 +2,7 @@ import SwiftUI
 import UIKit
 
 enum SettingsRoute: Hashable {
-    case subscription, devices, appearance, exceptions, check, advanced, selfTest
+    case subscription, devices, appearance, exceptions, check, advanced, selfTest, diagnostics
 }
 
 struct SettingsView: View {
@@ -71,6 +71,10 @@ struct SettingsView: View {
                     NavigationLink(value: SettingsRoute.check) {
                         SettingsRow(icon: "stethoscope", color: .pink, title: "Проверка соединения")
                     }
+                    NavigationLink(value: SettingsRoute.diagnostics) {
+                        SettingsRow(icon: "waveform.path.ecg", color: .indigo, title: "Диагностика",
+                                    value: app.recentIncidents > 0 ? "сбоев: \(app.recentIncidents)" : nil)
+                    }
                     Link(destination: Config.supportURL) {
                         SettingsRow(icon: "paperplane.fill", color: Theme.telegram, title: "Поддержка", external: true)
                     }
@@ -97,6 +101,7 @@ struct SettingsView: View {
                 case .check: CheckView()
                 case .advanced: AdvancedView()
                 case .selfTest: SelfTestView()
+                case .diagnostics: DiagnosticsCenter()
                 }
             }
             .confirmationDialog("Выйти из аккаунта?", isPresented: $confirmLogout, titleVisibility: .visible) {
@@ -370,6 +375,9 @@ struct AdvancedView: View {
 
             Section {
                 SettingsRow(icon: "info", color: Theme.gray, title: "Версия", value: Config.version)
+                NavigationLink(value: SettingsRoute.diagnostics) {
+                    SettingsRow(icon: "waveform.path.ecg", color: Theme.gray, title: "Диагностика и журналы")
+                }
                 Button {
                     UIPasteboard.general.string = app.supportReport()
                     app.showToast("Отчёт скопирован — отправьте его в поддержку", icon: "doc.on.doc.fill", tone: .good)

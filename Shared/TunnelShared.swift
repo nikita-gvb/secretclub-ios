@@ -52,6 +52,20 @@ struct AutoPool: Codable {
     /// Все группы по приоритету: обычные → мосты → резерв.
     static let priority = ["regular", "bridge", "reserve"]
     static func rank(_ group: String) -> Int { priority.firstIndex(of: group) ?? priority.count }
+
+    /// Порядок попыток: до двух лучших из каждой группы (обычные → мосты → резерв), всего до 4 —
+    /// чтобы при «общей» беде группы (замирание, белый список) следующим шёл сервер другого типа.
+    static func diverse(_ ranked: [AutoCandidate]) -> [AutoCandidate] {
+        var counts: [String: Int] = [:]
+        var out: [AutoCandidate] = []
+        for c in ranked where out.count < 4 {
+            let n = counts[c.group, default: 0]
+            guard n < 2 else { continue }
+            counts[c.group] = n + 1
+            out.append(c)
+        }
+        return out
+    }
 }
 
 /// Сервер для замера задержки из расширения (мимо туннеля).
@@ -65,7 +79,7 @@ struct PingTarget: Codable, Hashable {
 }
 
 struct TunnelCommand: Codable {
-    enum Kind: String, Codable { case status, reload, ping, pool, check }
+    enum Kind: String, Codable { case status, reload, ping, pool, check, log }
     var kind: Kind
     var config: String? = nil
     var routeID: String? = nil
@@ -107,6 +121,12 @@ struct TunnelReport: Codable, Equatable {
     var multi: Bool? = nil
     /// Откуда счётчики трафика: core — из ядра, utun — по интерфейсу (запасной путь).
     var counters: String? = nil
+    /// Ядро переключает сервер без перезапуска (все запасные уже внутри).
+    var hot: Bool? = nil
+    /// Ответ на команду log: конец журнала расширения (когда нет общей папки с приложением).
+    var logTail: String? = nil
+    /// Ответ на команду log: сбои, которые заметило само расширение.
+    var incidents: [Incident]? = nil
 }
 
 enum TunnelCoding {

@@ -1,12 +1,36 @@
 import Foundation
 
+struct XrayError: LocalizedError {
+    let message: String
+    var errorDescription: String? { message }
+}
+
 /// Сборка конфигурации ядра в расширении: рабочий сервер + проверочные входы для запасных.
 ///
 /// У каждого запасного сервера свой HTTP-вход на 127.0.0.1 и свои outbounds (теги с префиксом),
 /// поэтому расширение проверяет их все параллельно и по-настоящему (через само ядро),
-/// не трогая трафик пользователя. Переключение — ровно один перезапуск ядра.
+/// не трогая трафик пользователя. В «горячем» режиме трафик идёт через балансировщик sc-route,
+/// и рабочий сервер меняется без перезапуска ядра (SecretClubSetBalancerTarget).
 enum CoreConfig {
     static let healthTag = "health-in"
+    /// Балансировщик, через который в «горячем» режиме идёт весь трафик рабочего сервера.
+    static let routeBalancer = "sc-route"
+    /// Проверочный вход самого рабочего сервера (в «горячем» режиме health-in идёт через балансировщик).
+    static let mainProbeTag = "hcm"
+
+    /// Собранный конфиг.
+    struct Built {
+        var text: String
+        /// id запасного (и рабочего — в «горячем» режиме) → порт проверочного входа.
+        var ports: [String: Int]
+        /// «Горячий» режим: id сервера → тег его outbound в ядре. Пусто — переключение только перезапуском.
+        var tags: [String: String]
+        /// Тег основного outbound рабочего сервера.
+        var main: String?
+        /// В конфиге есть балансировщик sc-route — его нужно сразу направить на рабочий сервер.
+        var balanced = false
+        var hot: Bool { balanced && tags.count >= 2 }
+    }
     static let serviceProtocols: Set<String> = ["freedom", "blackhole", "dns", "loopback"]
 
     static func object(_ text: String) -> [String: Any]? {
@@ -64,9 +88,11 @@ enum CoreConfig {
     }
 
     /// Готовый к запуску конфиг: дескриптор туннеля, geo-файлы, проверочный вход рабочего сервера
-    /// и (если есть) проверочные входы запасных. Возвращает текст и карту «id запасного → порт».
+    /// и (если есть) проверочные входы запасных. hot — весь трафик рабочего сервера через балансировщик,
+    /// чтобы переключаться на запасные без перезапуска. Портов нужно extras.count + 1 (последний — рабочему).
     static func compose(active text: String, fd: Int32, assetDir: String?, healthPort: Int,
-                        extras: [(id: String, config: String)], ports: [Int]) throws -> (text: String, ports: [String: Int]) {
+                        extras: [(id: String, config: String)], ports: [Int],
+                        activeID: String? = nil, hot: Bool = false) throws -> Built {
         guard var root = object(text) else { throw XrayError(message: "некорректная конфигурация") }
         var env = root["env"] as? [String: Any] ?? [:]
         env["xray.tun.fd"] = String(fd)
@@ -91,17 +117,43 @@ enum CoreConfig {
         root["policy"] = policy
         // Наблюдатель (пинг серверов по таймеру) нужен только балансировщику — без него не будим сеть.
         let routingObject = root["routing"] as? [String: Any]
-        if (routingObject?["balancers"] as? [Any] ?? []).isEmpty {
+        let ownBalancers = !(routingObject?["balancers"] as? [Any] ?? []).isEmpty
+        if !ownBalancers {
             root.removeValue(forKey: "observatory")
             root.removeValue(forKey: "burstObservatory")
         }
 
         var map: [String: Int] = [:]
+        var tags: [String: String] = [:]
+        var balanced = false
+        var outbounds = root["outbounds"] as? [[String: Any]] ?? []
+        let mainTag = mainOutbound(outbounds)?["tag"] as? String
         if !extras.isEmpty {
-            var outbounds = root["outbounds"] as? [[String: Any]] ?? []
             var routing = routingObject ?? [:]
             var rules = routing["rules"] as? [[String: Any]] ?? []
             var head: [[String: Any]] = []
+            // Свой балансировщик в конфиге сервера — не вмешиваемся, переключаем перезапуском.
+            let useHot = hot && !ownBalancers && mainTag != nil
+            if useHot, let mainTag {
+                rules = rules.map { rule in
+                    guard (rule["outboundTag"] as? String) == mainTag else { return rule }
+                    var changed = rule
+                    changed.removeValue(forKey: "outboundTag")
+                    changed["balancerTag"] = routeBalancer
+                    return changed
+                }
+                // Без подходящего правила ядро шлёт трафик в первый outbound — если это рабочий сервер,
+                // ведём такой трафик через балансировщик явно.
+                if (outbounds.first?["tag"] as? String) == mainTag {
+                    rules.append(["type": "field", "network": "tcp,udp", "balancerTag": routeBalancer])
+                }
+                routing["balancers"] = [["tag": routeBalancer, "selector": [mainTag],
+                                         "strategy": ["type": "random"]] as [String: Any]]
+                // Проверка рабочего сервера (health-in) идёт тем же путём, что и трафик, — через балансировщик.
+                head.append(["type": "field", "inboundTag": [healthTag], "balancerTag": routeBalancer])
+                balanced = true
+                if let activeID { tags[activeID] = mainTag }
+            }
             for (index, extra) in extras.enumerated() where index < ports.count {
                 guard let config = object(extra.config),
                       let part = prefixed(config, prefix: "c\(index)-") else { continue }
@@ -111,6 +163,14 @@ enum CoreConfig {
                 outbounds += part.outbounds
                 head.append(["type": "field", "inboundTag": [inTag], "outboundTag": part.main])
                 map[extra.id] = ports[index]
+                if useHot { tags[extra.id] = part.main }
+            }
+            // health-in в «горячем» режиме идёт за балансировщиком, а у самого рабочего — свой вход.
+            if useHot, let mainTag, let activeID, extras.count < ports.count {
+                inbounds.append(["tag": mainProbeTag, "listen": "127.0.0.1", "port": ports[extras.count],
+                                 "protocol": "http", "settings": [String: Any]()])
+                head.append(["type": "field", "inboundTag": [mainProbeTag], "outboundTag": mainTag])
+                map[activeID] = ports[extras.count]
             }
             rules = head + rules
             routing["rules"] = rules
@@ -119,6 +179,6 @@ enum CoreConfig {
         }
         root["inbounds"] = inbounds
         guard let result = Self.text(root) else { throw XrayError(message: "не удалось собрать конфигурацию") }
-        return (result, map)
+        return Built(text: result, ports: map, tags: tags, main: mainTag, balanced: balanced)
     }
 }

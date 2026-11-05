@@ -7,8 +7,8 @@ options:
   createIntermediateGroups: true
 settings:
   base:
-    MARKETING_VERSION: "0.7.1"
-    CURRENT_PROJECT_VERSION: "8"
+    MARKETING_VERSION: "0.8"
+    CURRENT_PROJECT_VERSION: "9"
     SWIFT_VERSION: "5.0"
     IPHONEOS_DEPLOYMENT_TARGET: "17.0"
     TARGETED_DEVICE_FAMILY: "1"
@@ -23,6 +23,7 @@ targets:
     sources:
       - path: App
       - path: Shared
+      - path: Common
       - path: Geo
         buildPhase: resources
     settings:
@@ -53,6 +54,7 @@ targets:
             CFBundleURLSchemes: [secretclub]
     dependencies:
       - target: PacketTunnel
+      - target: SecretClubWidgets
       - framework: Vendor/LibXray.xcframework
         embed: false
   PacketTunnel:
@@ -83,13 +85,58 @@ targets:
         NSExtension:
           NSExtensionPointIdentifier: com.apple.networkextension.packet-tunnel
           NSExtensionPrincipalClass: "$(PRODUCT_MODULE_NAME).PacketTunnelProvider"
+  SecretClubWidgets:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: Widgets
+      - path: Common
+      - path: Shared/AppGroup.swift
+      - path: Shared/DiagLog.swift
+      - path: Shared/SharedStatus.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.secretclub.app.widgets
+        PRODUCT_NAME: SecretClubWidgets
+        CODE_SIGN_ENTITLEMENTS: Support/SecretClubWidgets.entitlements
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: ""
+        ASSETCATALOG_COMPILER_WIDGET_BACKGROUND_COLOR_NAME: ""
+    info:
+      path: Support/SecretClubWidgets-Info.plist
+      properties:
+        CFBundleDisplayName: SecretClub
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+  SecretClubTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Tests
+      - path: Shared/CoreConfig.swift
+      - path: Shared/TunnelShared.swift
+      - path: Shared/NetworkCheck.swift
+      - path: Shared/Probe.swift
+      - path: Shared/SharedStatus.swift
+      - path: Shared/AppGroup.swift
+      - path: Shared/DiagLog.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.secretclub.app.tests
+        GENERATE_INFOPLIST_FILE: YES
 schemes:
   SecretClub:
     build:
       targets:
         SecretClub: all
         PacketTunnel: all
+        SecretClubWidgets: all
     run:
       config: Debug
+    test:
+      config: Debug
+      targets:
+        - SecretClubTests
     archive:
       config: Release

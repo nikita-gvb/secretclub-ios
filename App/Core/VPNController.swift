@@ -202,12 +202,14 @@ final class VPNController {
             try m.connection.startVPNTunnel(options: options)
         } catch {
             state = .disconnected
+            DiagLog.warn("VPN не запустился: \(Self.describe(error))", to: .app)
             throw VPNError(Self.describe(error))
         }
         let status = await waitForOutcome(m, timeout: 40)
         update(status)
         guard status == .connected else {
             let reason = await disconnectReason(m)
+            DiagLog.warn("не удалось подключиться к «\(request.routeTitle)»: \(reason ?? "статус \(status.rawValue)")", to: .app)
             throw VPNError(reason ?? "Не удалось подключиться к «\(request.routeTitle)». Попробуйте другой сервер.")
         }
     }
@@ -220,7 +222,10 @@ final class VPNController {
         guard let reply = await send(command, attempts: 1, timeout: 25) else { return false }
         report = reply
         onReport?(reply)
-        if let error = reply.error, !reply.running { lastError = "Сервер не запустился: \(error)" }
+        if let error = reply.error, !reply.running {
+            lastError = "Сервер не запустился: \(error)"
+            DiagLog.warn("сервер «\(request.routeTitle)» не запустился: \(error)", to: .app)
+        }
         return reply.running && reply.error == nil
     }
 
@@ -459,6 +464,13 @@ final class VPNController {
 
     private func update(_ status: NEVPNStatus) {
         let probe = report?.probe == true
+        let before = state
+        defer {
+            if state != before {
+                if !isDemo && !probe { DiagLog.write("VPN: \(Self.title(before)) → \(Self.title(state))", to: .app) }
+                WidgetSync.reload()
+            }
+        }
         switch status {
         case .connected:
             state = .connected
@@ -481,6 +493,23 @@ final class VPNController {
             stopStats()
             resetRates()
         }
+    }
+
+    static func title(_ state: State) -> String {
+        switch state {
+        case .disconnected: return "выключен"
+        case .preparing: return "выбор сервера"
+        case .connecting: return "подключается"
+        case .connected: return "подключён"
+        case .disconnecting: return "отключается"
+        case .invalid: return "нет профиля"
+        }
+    }
+
+    /// Журнал и сбои расширения — когда у приложения и расширения нет общей папки (App Group).
+    func fetchTunnelLog() async -> TunnelReport? {
+        guard !isDemo, state == .connected || state == .connecting else { return nil }
+        return await send(TunnelCommand(kind: .log), attempts: 1, timeout: 4)
     }
 
     static func describe(_ error: Error) -> String {

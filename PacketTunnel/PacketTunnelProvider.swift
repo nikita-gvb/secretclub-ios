@@ -9,7 +9,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     let log = Logger(subsystem: "com.secretclub.app.tunnel", category: "provider")
     /// Все обращения к ядру и к состоянию ниже — только на этой очереди.
     let work = DispatchQueue(label: "com.secretclub.tunnel.work", qos: .userInitiated)
-    var report = TunnelReport()
+    /// Копия отчёта для мгновенного ответа приложению, пока очередь work занята (перезапуск ядра, проверка).
+    let snapshot = ReportBox()
+    var report = TunnelReport() { didSet { snapshot.set(report) } }
 
     /// Рабочий сервер: его конфиг сейчас в ядре.
     struct Active {
@@ -25,6 +27,16 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     var extraPorts: [String: Int] = [:]
     /// Ядро не приняло общий конфиг — до нового пула запускаем серверы по одному.
     var multiBroken = false
+    /// Ядро не приняло «горячий» конфиг (балансировщик) — переключаем перезапуском.
+    var hotBroken = false
+    /// «Горячий» режим: id сервера → тег его outbound в запущенном ядре.
+    var routeTags: [String: String] = [:]
+    /// Когда включили VPN (для виджета «подключено N минут»).
+    var sessionStart: Date?
+    var lastStatus: SharedStatus?
+    var peakMB: Double = 0
+    var loggedPeakMB: Double = 0
+    var sessionTouched: Date?
     var launchedAt: Date?
     var utunName: String?
     var ifaceLast: (out: UInt32, inb: UInt32)?
@@ -95,12 +107,25 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         let routeID = (options?[TunnelOption.routeID] as? String) ?? (stored?[TunnelOption.routeID] as? String)
         let routeTitle = (options?[TunnelOption.routeTitle] as? String) ?? (stored?[TunnelOption.routeTitle] as? String)
         guard let config, !config.isEmpty else {
+            DiagLog.warn("запуск без настроек подключения", to: .tunnel)
             completionHandler(Self.error("Нет настроек подключения. Откройте SecretClub и нажмите «Подключить»."))
             return
+        }
+        let byApp = options?[TunnelOption.config] != nil
+        work.async {
+            self.noteUncleanExit()
+            self.sessionStart = Date()
+            self.peakMB = Self.footprintMB ?? 0
+            self.touchSession(force: true, route: routeTitle)
+            DiagLog.write("включение VPN (\(byApp ? "из приложения" : "без приложения: виджет, команда или автоподключение")), "
+                          + "«\(routeTitle ?? "?")», ядро \(XrayEngine.version), iOS \(ProcessInfo.processInfo.operatingSystemVersionString)",
+                          to: .tunnel)
         }
 
         setTunnelNetworkSettings(Self.tunnelSettings()) { error in
             if let error {
+                DiagLog.warn("не удалось настроить туннель: \(error.localizedDescription)", to: .tunnel)
+                self.work.async { TunnelSession.end() }
                 completionHandler(Self.error("Не удалось настроить туннель: \(error.localizedDescription)"))
                 return
             }
@@ -116,6 +141,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                     try self.launch(target)
                 } catch {
                     self.log.error("start failed: \(error.localizedDescription, privacy: .public)")
+                    DiagLog.warn("ядро не запустилось: \(error.localizedDescription)", to: .tunnel)
+                    TunnelSession.end()
                     self.report.error = error.localizedDescription
                     completionHandler(Self.error("Ядро Xray не запустилось: \(error.localizedDescription)"))
                     return
@@ -146,10 +173,17 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             self.startCompletion = nil
             self.stopMonitoring()
             if self.report.running {
+                self.updateCounters()
                 XrayEngine.stopSync()
                 self.report.running = false
             }
             self.memory.save()
+            let minutes = self.sessionStart.map { Int(Date().timeIntervalSince($0) / 60) } ?? 0
+            let text = "выключение VPN: \(Self.describe(reason)); \(minutes) мин, ↑\(Self.mb(self.report.uplink)) ↓\(Self.mb(self.report.downlink)), память до \(Int(self.peakMB.rounded())) МБ"
+            if Self.unexpected(reason) { DiagLog.warn(text, to: .tunnel) } else { DiagLog.write(text, to: .tunnel) }
+            TunnelSession.end()
+            self.publishStatus()
+            DiagLog.flush()
             completionHandler()
         }
     }
@@ -189,39 +223,48 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         }
         switch command.kind {
         case .status:
-            work.async {
+            respond(completionHandler) {
                 self.updateCounters()
                 self.report.memoryMB = Self.footprintMB
-                completionHandler?(TunnelCoding.encode(self.report))
             }
         case .pool:
-            work.async {
+            respond(completionHandler) {
                 if let pool = command.pool {
+                    if pool.candidates.map(\.id) != self.pool?.candidates.map(\.id) || pool.auto != self.pool?.auto {
+                        DiagLog.write("список серверов: \(pool.candidates.count), \(pool.auto ? "авто" : "выбран вручную")", to: .tunnel)
+                    }
                     self.pool = pool
                     self.multiBroken = false
+                    self.hotBroken = false
                     Self.savePool(pool)
+                    self.publishStatus()
                 }
-                completionHandler?(TunnelCoding.encode(self.report))
             }
         case .check:
-            work.async {
+            respond(completionHandler) {
                 // Смену сети расширение видит само, раньше приложения, — от приложения это просто «проверь».
                 let fresh = self.lastCheck.map { Date().timeIntervalSince($0) < 60 } ?? false
                 if !(fresh && self.report.healthy == true) && !self.evaluating && self.pendingCheck == nil {
                     self.scheduleCheck(.app, delay: 0)
                 }
-                completionHandler?(TunnelCoding.encode(self.report))
             }
         case .ping:
             // Свои соединения расширения идут мимо туннеля — замер честный.
             let targets = command.targets ?? []
             Task {
                 let results = await LatencyProbe.direct(targets, timeout: 3)
-                self.work.async {
-                    var reply = self.report
-                    reply.pings = results
-                    completionHandler?(TunnelCoding.encode(reply))
-                }
+                var reply = self.snapshot.get()
+                reply.pings = results
+                completionHandler?(TunnelCoding.encode(reply))
+            }
+        case .log:
+            // Журнал читаем мимо очереди work — ответ сразу, даже во время перезапуска ядра.
+            DispatchQueue.global(qos: .userInitiated).async {
+                var reply = self.snapshot.get()
+                reply.memoryMB = Self.footprintMB
+                reply.logTail = DiagLog.read(.tunnel, maxBytes: 96 * 1024)
+                reply.incidents = Incidents.all()
+                completionHandler?(TunnelCoding.encode(reply))
             }
         case .reload:
             guard let config = command.config else {
@@ -229,6 +272,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 return
             }
             work.async {
+                // Сервер выбрали вручную — перезапуск: все соединения сразу переходят на новый
+                // (при «горячем» переключении открытые страницы ещё какое-то время шли бы через прежний).
                 self.reasserting = true
                 do {
                     try self.launch(Active(id: command.routeID, title: command.routeTitle, config: config))
@@ -237,6 +282,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                     self.event("приложение сменило сервер → «\(command.routeTitle ?? "?")»")
                 } catch {
                     self.report.error = error.localizedDescription
+                    DiagLog.warn("не удалось сменить сервер на «\(command.routeTitle ?? "?")»: \(error.localizedDescription)", to: .tunnel)
                 }
                 self.reasserting = false
                 if self.report.running { self.scheduleCheck(.reload, delay: 1.5) }
@@ -248,7 +294,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     // MARK: - Ядро
 
     /// Запускает ядро с этим сервером в роли рабочего и проверочными входами для запасных.
-    /// Если ядро не приняло общий конфиг — запускает один сервер, как раньше. На очереди work.
+    /// Попытки по убыванию возможностей: «горячий» общий конфиг → общий → один сервер. На очереди work.
     func launch(_ target: Active) throws {
         if stopped { throw Self.error("туннель остановлен") }
         if report.running {
@@ -266,24 +312,46 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         let extras = multiBroken ? [] : extrasFor(target.id)
         var ports: [Int] = []
         if !extras.isEmpty {
-            ports = XrayEngine.freePorts(extras.count + 1).filter { $0 != healthPort }
+            ports = XrayEngine.freePorts(extras.count + 2).filter { $0 != healthPort }
         }
+        var attempts: [(extras: [(id: String, config: String)], hot: Bool)] = []
+        if !extras.isEmpty {
+            if !hotBroken { attempts.append((extras, true)) }
+            attempts.append((extras, false))
+        }
+        attempts.append(([], false))
         let assets = Bundle.main.resourcePath
-        do {
-            let built = try CoreConfig.compose(active: target.config, fd: fd, assetDir: assets, healthPort: healthPort,
-                                               extras: extras, ports: ports)
-            try XrayEngine.runSync(built.text)
-            extraPorts = built.ports
-        } catch let error where !extras.isEmpty {
-            // Какой-то запасной сервер ядру не понравился — работаем по-старому, по одному серверу.
-            event("ядро не приняло общий конфиг (\(error.localizedDescription)) — проверяем по одному")
-            multiBroken = true
-            XrayEngine.stopSync()
-            let built = try CoreConfig.compose(active: target.config, fd: fd, assetDir: assets, healthPort: healthPort,
-                                               extras: [], ports: [])
-            try XrayEngine.runSync(built.text)
-            extraPorts = [:]
+        var built: CoreConfig.Built?
+        var lastError: Error?
+        for attempt in attempts {
+            do {
+                let candidate = try CoreConfig.compose(active: target.config, fd: fd, assetDir: assets, healthPort: healthPort,
+                                                       extras: attempt.extras, ports: ports, activeID: target.id, hot: attempt.hot)
+                try XrayEngine.runSync(candidate.text)
+                // Балансировщик сразу направляем на рабочий сервер, иначе он выберет outbound сам.
+                if candidate.balanced {
+                    guard let main = candidate.main, XrayEngine.setBalancerTarget(CoreConfig.routeBalancer, main) else {
+                        throw Self.error("ядро не переключает балансировщик")
+                    }
+                }
+                built = candidate
+                break
+            } catch {
+                lastError = error
+                XrayEngine.stopSync()
+                if attempt.hot {
+                    hotBroken = true
+                    event("ядро не приняло конфиг для переключения без перезапуска (\(error.localizedDescription)) — переключаем перезапуском")
+                } else if !attempt.extras.isEmpty {
+                    // Какой-то запасной сервер ядру не понравился — работаем по-старому, по одному серверу.
+                    multiBroken = true
+                    event("ядро не приняло общий конфиг (\(error.localizedDescription)) — проверяем по одному")
+                }
+            }
         }
+        guard let built else { throw lastError ?? Self.error("ядро не запустилось") }
+        extraPorts = built.ports
+        routeTags = built.hot ? built.tags : [:]
         active = target
         counterNames = CoreConfig.counterNames(target.config)
         launchedAt = Date()
@@ -293,8 +361,39 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         report.startedAt = Date()
         report.error = nil
         report.multi = !extraPorts.isEmpty
-        log.info("xray started, fd \(fd), health \(self.healthPort), extras \(self.extraPorts.count)")
+        report.hot = !routeTags.isEmpty
+        log.info("xray started, fd \(fd), health \(self.healthPort), extras \(self.extraPorts.count), hot \(!self.routeTags.isEmpty)")
+        DiagLog.write("ядро запущено: «\(target.title ?? "?")», запасных в ядре \(extras.isEmpty ? 0 : max(0, built.ports.count - (routeTags.isEmpty ? 0 : 1)))"
+                      + (routeTags.isEmpty ? "" : ", переключение без перезапуска"), to: .tunnel)
+        publishStatus()
         TunnelSignal.post()
+    }
+
+    /// Смена рабочего сервера без перезапуска ядра: балансировщик переводится на outbound, уже загруженный
+    /// в ядро. Открытые соединения доживают через прежний сервер, новые идут через новый. На очереди work.
+    @discardableResult
+    func hotSwitch(_ target: Active) -> Bool {
+        guard report.running, !stopped, let id = target.id, id != active?.id, let tag = routeTags[id],
+              let current = active?.id, routeTags[current] != nil else { return false }
+        updateCounters()
+        guard XrayEngine.setBalancerTarget(CoreConfig.routeBalancer, tag) else {
+            event("переключение без перезапуска не удалось — дальше перезапуском")
+            routeTags = [:]
+            report.hot = false
+            return false
+        }
+        // Счётчик «получено от сервера» теперь у другого outbound — продолжаем итог без скачка.
+        let name = "outbound>>>\(tag)>>>traffic>>>downlink"
+        trafficBase.server = serverDown - (XrayEngine.counter(name) ?? 0)
+        if let names = counterNames { counterNames = (names.up, names.down, name) }
+        active = target
+        launchedAt = Date()
+        report.routeID = target.id
+        report.routeTitle = target.title
+        report.error = nil
+        publishStatus()
+        TunnelSignal.post()
+        return true
     }
 
     /// Какие запасные серверы держать в ядре: по нескольку лучших из каждой группы.
@@ -367,6 +466,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         if events.count > 24 { events.removeFirst(events.count - 24) }
         report.events = events
         log.info("\(text, privacy: .public)")
+        DiagLog.write(text, to: .tunnel)
     }
 
     /// На очереди work.
@@ -374,6 +474,130 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         report.note = text
         report.noteID += 1
         TunnelSignal.post()
+    }
+
+    // MARK: - Ответы приложению
+
+    /// Выполнить на очереди work и ответить отчётом. Если очередь занята дольше 0,25 с (перезапуск ядра,
+    /// проверка), приложение сразу получает последнюю копию отчёта, а работа доделывается в фоне.
+    func respond(_ completion: ((Data?) -> Void)?, _ body: @escaping () -> Void) {
+        let once = ReplyOnce(completion)
+        let snapshot = self.snapshot
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.25) {
+            guard once.pending else { return }
+            var reply = snapshot.get()
+            reply.memoryMB = Self.footprintMB
+            once.send(TunnelCoding.encode(reply))
+        }
+        work.async {
+            body()
+            once.send(TunnelCoding.encode(self.report))
+        }
+    }
+
+    // MARK: - Общее состояние и диагностика
+
+    /// Состояние для виджетов (общая папка). Пишем, только когда оно изменилось. На очереди work.
+    func publishStatus() {
+        var status = SharedStatus()
+        status.running = report.running && !stopped
+        status.routeID = active?.id
+        status.routeTitle = active?.title
+        status.pingMS = report.pingMS
+        status.healthy = report.healthy
+        status.network = report.network
+        status.auto = pool?.auto
+        status.since = status.running ? sessionStart : nil
+        guard !status.same(as: lastStatus) else { return }
+        status.save()
+        lastStatus = status
+    }
+
+    /// Прошлый сеанс не закрылся через stopTunnel — расширение завершилось аварийно (память, сбой). На очереди work.
+    func noteUncleanExit() {
+        guard let previous = TunnelSession.load() else { return }
+        TunnelSession.end()
+        // Устройство перезагружалось или приложение обновили после последнего признака жизни — это не сбой.
+        if let boot = Self.bootTime, previous.alive < boot { return }
+        if let build = previous.build, build != Self.build { return }
+        let time = DateFormatter.localizedString(from: previous.alive, dateStyle: .short, timeStyle: .short)
+        var detail = "Последний признак жизни \(time), сервер «\(previous.route ?? "?")», память до \(Int(previous.peakMB.rounded())) МБ, ядро \(previous.version)."
+        if previous.peakMB >= 44 { detail += " Похоже, iOS выгрузила VPN из-за лимита памяти (50 МБ)." }
+        DiagLog.warn("прошлый сеанс VPN завершился аварийно: \(detail)", to: .tunnel)
+        Incidents.add(Incident(id: "tunnel-\(Int(previous.started.timeIntervalSince1970))", date: previous.alive, source: .tunnel,
+                               title: "VPN завершился аварийно", detail: detail))
+    }
+
+    /// Метка живого сеанса: при запуске, раз в 5 минут и при росте памяти. На очереди work.
+    func touchSession(force: Bool = false, route: String? = nil) {
+        let now = Date()
+        if !force, let last = sessionTouched, now.timeIntervalSince(last) < 300 { return }
+        sessionTouched = now
+        TunnelSession.save(TunnelSession.State(started: sessionStart ?? now, alive: now, peakMB: peakMB,
+                                               route: route ?? active?.title, version: XrayEngine.version, build: Self.build))
+    }
+
+    /// Сторож памяти: пик за сеанс, запись в журнал при заметном росте. На очереди work.
+    func trackMemory() {
+        guard let mb = Self.footprintMB else { return }
+        report.memoryMB = mb
+        guard mb > peakMB else { return }
+        let grew = mb - peakMB >= 1
+        peakMB = mb
+        if mb - loggedPeakMB >= 3 {
+            loggedPeakMB = mb
+            let text = "память расширения: \(Int(mb.rounded())) МБ"
+            if mb >= 40 { DiagLog.warn(text + " (лимит iOS — 50 МБ)", to: .tunnel) } else { DiagLog.write(text, to: .tunnel) }
+        }
+        if grew { touchSession(force: true) }
+    }
+
+    static let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"
+
+    static var bootTime: Date? {
+        var tv = timeval()
+        var size = MemoryLayout<timeval>.stride
+        var mib: [Int32] = [CTL_KERN, KERN_BOOTTIME]
+        guard sysctl(&mib, 2, &tv, &size, nil, 0) == 0, tv.tv_sec > 0 else { return nil }
+        return Date(timeIntervalSince1970: TimeInterval(tv.tv_sec))
+    }
+
+    static func mb(_ bytes: Int64) -> String {
+        bytes < 1_048_576 ? "\(bytes / 1024) КБ" : String(format: "%.1f МБ", Double(bytes) / 1_048_576)
+    }
+
+    static func unexpected(_ reason: NEProviderStopReason) -> Bool {
+        switch reason {
+        case .userInitiated, .superceded, .userLogout, .userSwitch, .configurationRemoved, .configurationDisabled,
+             .sleep, .appUpdate, NEProviderStopReason.none:
+            return false
+        default:
+            return true
+        }
+    }
+
+    static func describe(_ reason: NEProviderStopReason) -> String {
+        switch reason {
+        case NEProviderStopReason.none: return "без причины"
+        case .userInitiated: return "выключили (приложение, Пункт управления или Настройки)"
+        case .providerFailed: return "сбой расширения"
+        case .noNetworkAvailable: return "нет сети"
+        case .unrecoverableNetworkChange: return "смена сети, которую не пережить"
+        case .providerDisabled: return "расширение отключено"
+        case .authenticationCanceled: return "отмена авторизации"
+        case .configurationFailed: return "ошибка конфигурации"
+        case .idleTimeout: return "простой"
+        case .configurationDisabled: return "профиль VPN выключен"
+        case .configurationRemoved: return "профиль VPN удалён"
+        case .superceded: return "включили другой VPN"
+        case .userLogout: return "выход из аккаунта"
+        case .userSwitch: return "смена пользователя"
+        case .connectionFailed: return "не удалось подключиться"
+        case .sleep: return "сон устройства"
+        case .appUpdate: return "обновление приложения"
+        case .internalError: return "внутренняя ошибка iOS"
+        @unknown default: return "код \(reason.rawValue)"
+        }
     }
 
     // MARK: - Сеть
@@ -445,5 +669,45 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     static func error(_ message: String) -> NSError {
         NSError(domain: "com.secretclub.tunnel", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+    }
+}
+
+/// Потокобезопасная копия отчёта (читается вне очереди work).
+final class ReportBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = TunnelReport()
+
+    func set(_ report: TunnelReport) {
+        lock.lock()
+        value = report
+        lock.unlock()
+    }
+
+    func get() -> TunnelReport {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+}
+
+/// Ответ приложению ровно один раз (быстрый из копии или полный с очереди work — что раньше).
+final class ReplyOnce: @unchecked Sendable {
+    private let lock = NSLock()
+    private var handler: ((Data?) -> Void)?
+
+    init(_ handler: ((Data?) -> Void)?) { self.handler = handler }
+
+    var pending: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return handler != nil
+    }
+
+    func send(_ data: Data?) {
+        lock.lock()
+        let handler = self.handler
+        self.handler = nil
+        lock.unlock()
+        handler?(data)
     }
 }

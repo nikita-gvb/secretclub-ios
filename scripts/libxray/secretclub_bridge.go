@@ -18,3 +18,16 @@ func SecretClubCounter(name *C.char) C.longlong {
 	}
 	return C.longlong(value)
 }
+
+// SecretClubSetBalancerTarget — переключить балансировщик на outbound; 1 — получилось, 0 — нет.
+//
+//export SecretClubSetBalancerTarget
+func SecretClubSetBalancerTarget(balancer *C.char, target *C.char) C.int {
+	if balancer == nil || target == nil {
+		return 0
+	}
+	if err := xray.SetBalancerTarget(C.GoString(balancer), C.GoString(target)); err != nil {
+		return 0
+	}
+	return 1
+}

@@ -23,6 +23,7 @@ final class ProbeConnection: @unchecked Sendable {
     private let queue = DispatchQueue(label: "com.secretclub.probe")
     private let lock = NSLock()
     private var closed = false
+    private var progress = 0
 
     init?(host: String, port: Int, parameters: NWParameters) {
         guard let p = NWEndpoint.Port(rawValue: UInt16(clamping: port)), port > 0 else { return nil }
@@ -50,6 +51,21 @@ final class ProbeConnection: @unchecked Sendable {
             }
             connection.start(queue: queue)
             if isClosed { once.resume(false) }
+        }
+    }
+
+    /// Закрыть соединение, если за seconds не будет нового вызова armIdle (данные перестали идти).
+    func armIdle(_ seconds: Double) {
+        lock.lock()
+        progress += 1
+        let mark = progress
+        lock.unlock()
+        queue.asyncAfter(deadline: .now() + seconds) { [weak self] in
+            guard let self else { return }
+            self.lock.lock()
+            let same = self.progress == mark
+            self.lock.unlock()
+            if same { self.close() }
         }
     }
 
@@ -248,6 +264,8 @@ enum LatencyProbe {
             let goal = min(expected, 98304)
             var received = first
             while received < goal {
+                // «Замёрзшее» соединение не рвётся, а просто молчит — не ждём общий таймаут.
+                c.armIdle(3)
                 guard let chunk = await c.receiveChunk() else { break }
                 received += chunk.count
             }

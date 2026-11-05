@@ -7,10 +7,13 @@ struct NetMemory: Codable {
     struct Entry: Codable {
         var kind: String?
         var best: String?
-        /// Обычные серверы «замирают» после ~16 КБ — в этой сети сразу берём мосты.
-        var freeze: Bool?
+        /// До этого времени обычные серверы в этой сети «замирают» после ~16 КБ — сразу берём мосты.
+        /// Срок ограничен: блокировку могут снять, тогда обычные серверы снова в деле.
+        var freezeUntil: Date?
         var payloadAt: Date?
         var at: Date
+
+        var frozen: Bool { freezeUntil.map { $0 > Date() } ?? false }
     }
 
     var entries: [String: Entry] = [:]
@@ -244,7 +247,7 @@ extension PacketTunnelProvider {
     }
 
     /// Таймер: если трафик уходит в туннель, а в ответ почти ничего — сервер, похоже, умер.
-    /// Пока трафика нет, тикает всё реже (10 → 30 → 60 с) — меньше пробуждений.
+    /// Пока трафика нет, тикает реже (10 → 30 с) — меньше пробуждений; во сне не тикает вовсе.
     func watchdogTick() {
         updateCounters()
         let up = report.uplink - lastTraffic.up
@@ -252,7 +255,7 @@ extension PacketTunnelProvider {
         lastTraffic = (report.uplink, report.downlink)
         let busy = up + down > 4096
         idleTicks = busy ? 0 : idleTicks + 1
-        let next: Double = (busy || idleTicks < 3) ? 10 : (idleTicks < 12 ? 30 : 60)
+        let next: Double = (busy || idleTicks < 3) ? 10 : 30
         if next != watchInterval {
             watchInterval = next
             watchdog?.schedule(deadline: .now() + next, repeating: next, leeway: .milliseconds(Int(next * 250)))
@@ -335,7 +338,7 @@ extension PacketTunnelProvider {
         let hint = memory.entry(memoryKey)
         let auto = pool?.auto == true
         let activeGroup = pool?.group(of: current.id) ?? "regular"
-        let freeze = hint?.freeze == true
+        let freeze = hint?.frozen == true || regularFrozenCount >= 2
         let probe = CheckTarget(key: "#active", id: current.id ?? "", group: activeGroup, port: healthPort, active: true)
         var extras: [CheckTarget] = []
         var unprobed = false
@@ -517,9 +520,11 @@ extension PacketTunnelProvider {
         }
         let alive = s.activeMS != nil
         guard ctx.auto, let pool else { return Decision(targets: [], activeAlive: alive) }
+        // Замирание могли обнаружить посреди этой проверки (объёмный замер рабочего).
+        let freeze = ctx.freeze || regularFrozenCount >= 2
 
         let usable = pool.candidates.filter { c in
-            s.ok[c.id] != nil && c.id != activeID && !throttled.contains(c.id) && !(ctx.freeze && c.group == "regular")
+            s.ok[c.id] != nil && c.id != activeID && !throttled.contains(c.id) && !(freeze && c.group == "regular")
         }
         let ranked = usable.sorted { a, b in
             let ra = AutoPool.rank(a.group), rb = AutoPool.rank(b.group)
@@ -529,8 +534,8 @@ extension PacketTunnelProvider {
         }
         // «Рабочий жив, но в этой сети замирает» — ищем другой, но если других нет, остаёмся.
         let activeGood = alive && !(activeID.map { throttled.contains($0) } ?? false)
-            && !(ctx.freeze && ctx.activeGroup == "regular")
-        if !activeGood { return Decision(targets: Array(ranked.prefix(3)), activeAlive: alive) }
+            && !(freeze && ctx.activeGroup == "regular")
+        if !activeGood { return Decision(targets: Self.diverse(ranked), activeAlive: alive) }
         guard let best = ranked.first else { return Decision(targets: [], activeAlive: true) }
         let activeRank = AutoPool.rank(ctx.activeGroup)
         if AutoPool.rank(best.group) < activeRank {
@@ -547,6 +552,25 @@ extension PacketTunnelProvider {
         return Decision(targets: [], activeAlive: true)
     }
 
+    /// Порядок попыток: до двух лучших из каждой группы (обычные → мосты → резерв), всего до 4 —
+    /// чтобы при «общей» беде группы (замирание, белый список) следующим шёл сервер другого типа.
+    static func diverse(_ ranked: [AutoCandidate]) -> [AutoCandidate] {
+        var counts: [String: Int] = [:]
+        var out: [AutoCandidate] = []
+        for c in ranked where out.count < 4 {
+            let n = counts[c.group, default: 0]
+            guard n < 2 else { continue }
+            counts[c.group] = n + 1
+            out.append(c)
+        }
+        return out
+    }
+
+    /// Сколько обычных серверов «замерло» в этой сети. На очереди work.
+    var regularFrozenCount: Int {
+        throttled.filter { pool?.group(of: $0) == "regular" }.count
+    }
+
     /// Ниже — лучше: сглаженная задержка, штраф за неудачи и нагрузку узла, бонус «работал в этой сети».
     func score(_ id: String?, load: Double?, ms: Int, preferred: String?) -> Double {
         let stat = id.flatMap { stats[$0] }
@@ -559,6 +583,10 @@ extension PacketTunnelProvider {
 
     /// Переключение: один перезапуск ядра и короткая проверка. Не вышло ни с кем — возвращаем прежний.
     private func switchTo(_ targets: [AutoCandidate], ctx: CheckContext, restoreAlive: Bool) async -> (AutoCandidate, Int)? {
+        // Уходим с «замершего» сервера — новый обычный проверяем и объёмом, иначе он замрёт так же.
+        let verify = await onWork { () -> Bool in
+            ctx.reason == .stall && (self.active?.id).map { self.throttled.contains($0) } == true
+        }
         let original = await onWork { () -> Active? in
             if self.startCompletion == nil { self.reasserting = true }
             return self.active
@@ -577,6 +605,11 @@ extension PacketTunnelProvider {
             guard started else { continue }
             try? await Task.sleep(nanoseconds: 150_000_000)
             if let ms = await LatencyProbe.viaProxy(port: ctx.activeProbe.port, timeout: 3) {
+                if verify, candidate.group == "regular",
+                   case .stalled(let bytes) = await LatencyProbe.payload(port: ctx.activeProbe.port) {
+                    await onWork { self.markFrozen(candidate.id, bytes: bytes) }
+                    continue
+                }
                 found = (candidate, ms)
                 break
             }
@@ -614,8 +647,11 @@ extension PacketTunnelProvider {
         guard let id else { return }
         throttled.insert(id)
         event("«\(active?.title ?? id)»: соединение замирает после \(bytes / 1024) КБ")
-        if pool?.group(of: id) == "regular" {
-            memory.update(memoryKey) { $0.freeze = true }
+        // Замерли два обычных сервера — значит, дело в сети: запоминаем (мобильная — на 20 мин, Wi‑Fi — на 2 ч).
+        if pool?.group(of: id) == "regular", regularFrozenCount >= 2 {
+            let ttl: TimeInterval = (memoryKey ?? "").hasPrefix("cellular") ? 20 * 60 : 2 * 3600
+            memory.update(memoryKey) { $0.freezeUntil = Date().addingTimeInterval(ttl) }
+            event("обычные серверы в этой сети замирают — берём мосты")
         }
     }
 
@@ -624,7 +660,7 @@ extension PacketTunnelProvider {
         let start = await onWork { () -> (port: Int, launched: Date?)? in
             guard self.report.running, let id = self.active?.id, self.pool?.group(of: id) == "regular" else { return nil }
             let entry = self.memory.entry(self.memoryKey)
-            if entry?.freeze == true { return nil }
+            if entry?.frozen == true { return nil }
             if let at = entry?.payloadAt, Date().timeIntervalSince(at) < 86400 { return nil }
             return (self.healthPort, self.launchedAt)
         }
@@ -635,7 +671,7 @@ extension PacketTunnelProvider {
             guard self.launchedAt == start.launched, !self.evaluating else { return }
             switch verdict {
             case .ok(let speed):
-                self.memory.update(self.memoryKey) { $0.payloadAt = Date(); $0.freeze = false }
+                self.memory.update(self.memoryKey) { $0.payloadAt = Date(); $0.freezeUntil = nil }
                 self.event("проверка объёмом: ок, \(speed) КБ/с")
             case .stalled(let bytes):
                 self.markFrozen(self.active?.id, bytes: bytes)

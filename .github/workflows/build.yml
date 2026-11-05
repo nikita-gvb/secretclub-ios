@@ -26,7 +26,8 @@ jobs:
           xcodegen --version
 
       # LibXray собираем сами (scripts/build-libxray.sh): в официальной сборке ядро будит
-      # процессор каждую секунду (FreeOSMemory) — это лишний расход батареи.
+      # процессор каждую секунду (FreeOSMemory) — это лишний расход батареи; плюс наш
+      # SecretClubCounter (счётчики трафика). Официальная сборка без него не подойдёт.
       - name: Restore LibXray
         id: libxray-cache
         uses: actions/cache/restore@v4
@@ -44,7 +45,6 @@ jobs:
       - name: Build LibXray
         id: libxray-build
         if: steps.libxray-cache.outputs.cache-hit != 'true'
-        continue-on-error: true
         env:
           GOTOOLCHAIN: auto
         run: ./scripts/build-libxray.sh Vendor
@@ -55,17 +55,6 @@ jobs:
         with:
           path: Vendor/LibXray.xcframework
           key: ${{ steps.libxray-cache.outputs.cache-primary-key }}
-
-      - name: Download LibXray (fallback)
-        if: steps.libxray-cache.outputs.cache-hit != 'true' && steps.libxray-build.outcome != 'success'
-        run: |
-          echo "::warning::Собственная сборка LibXray не удалась — берём официальную"
-          rm -rf Vendor/LibXray.xcframework
-          mkdir -p Vendor /tmp/libxray
-          curl -fsSL -o /tmp/libxray.zip https://github.com/XTLS/libXray/releases/download/v26.10.31/libxray-apple-cgo.zip
-          unzip -q /tmp/libxray.zip -d /tmp/libxray
-          mv /tmp/libxray/libxray-apple-cgo/LibXray.xcframework Vendor/
-          ls Vendor/LibXray.xcframework
 
       - name: Generate project
         run: xcodegen generate

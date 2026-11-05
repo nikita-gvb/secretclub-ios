@@ -13,6 +13,9 @@ git init -q . && git remote add origin https://github.com/XTLS/libXray.git
 git fetch -q --depth 1 origin "$SHA" && git checkout -q FETCH_HEAD
 cp "$ROOT/scripts/libxray/memory_ios.go" memory/memory_ios.go
 grep -q "checkInterval" memory/memory_ios.go
+# Счётчики трафика прямо из ядра (SecretClubCounter) — счётчики utun на iOS не обновляются.
+cp "$ROOT/scripts/libxray/secretclub_stats.go" xray/secretclub_stats.go
+cp "$ROOT/scripts/libxray/secretclub_bridge.go" cgo_bridge/secretclub_bridge.go
 go version
 OUT="$WORK/out"
 mkdir -p "$OUT"
@@ -37,6 +40,7 @@ build iphonesimulator arm64 arm64
 mkdir -p "$OUT/iphonesimulator-arm64-x86_64" "$OUT/include"
 lipo -create -arch x86_64 "$OUT/iphonesimulator-x86_64/libXray.a" -arch arm64 "$OUT/iphonesimulator-arm64/libXray.a" \
   -output "$OUT/iphonesimulator-arm64-x86_64/libXray.a"
+grep -q "SecretClubCounter" "$OUT/iphoneos-arm64/libXray.h"
 cp "$OUT/iphoneos-arm64/libXray.h" "$OUT/include/"
 cp build/template/module.modulemap "$OUT/include/"
 rm -rf "$DEST/LibXray.xcframework" && mkdir -p "$DEST"
@@ -44,5 +48,5 @@ xcodebuild -create-xcframework \
   -library "$OUT/iphoneos-arm64/libXray.a" -headers "$OUT/include" \
   -library "$OUT/iphonesimulator-arm64-x86_64/libXray.a" -headers "$OUT/include" \
   -output "$DEST/LibXray.xcframework"
-echo "SecretClub libXray $SHA (memory: 20s/GOGC30)" > "$DEST/LibXray.xcframework/SECRETCLUB"
+echo "SecretClub libXray $SHA (memory: 20s/GOGC30, counters)" > "$DEST/LibXray.xcframework/SECRETCLUB"
 ls -la "$DEST/LibXray.xcframework"

@@ -42,6 +42,7 @@ lipo -create -arch x86_64 "$OUT/iphonesimulator-x86_64/libXray.a" -arch arm64 "$
   -output "$OUT/iphonesimulator-arm64-x86_64/libXray.a"
 grep -q "SecretClubCounter" "$OUT/iphoneos-arm64/libXray.h"
 grep -q "SecretClubSetBalancerTarget" "$OUT/iphoneos-arm64/libXray.h"
+grep -q "SecretClubFreeMemory" "$OUT/iphoneos-arm64/libXray.h"
 cp "$OUT/iphoneos-arm64/libXray.h" "$OUT/include/"
 cp build/template/module.modulemap "$OUT/include/"
 rm -rf "$DEST/LibXray.xcframework" && mkdir -p "$DEST"
@@ -49,5 +50,5 @@ xcodebuild -create-xcframework \
   -library "$OUT/iphoneos-arm64/libXray.a" -headers "$OUT/include" \
   -library "$OUT/iphonesimulator-arm64-x86_64/libXray.a" -headers "$OUT/include" \
   -output "$DEST/LibXray.xcframework"
-echo "SecretClub libXray $SHA (memory: 20s/GOGC30, counters, hot switch)" > "$DEST/LibXray.xcframework/SECRETCLUB"
+echo "SecretClub libXray $SHA (memory: 10s/GOGC30 + free on demand, counters, hot switch)" > "$DEST/LibXray.xcframework/SECRETCLUB"
 ls -la "$DEST/LibXray.xcframework"

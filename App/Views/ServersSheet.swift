@@ -9,18 +9,18 @@ struct ServersSheet: View {
     @State private var appeared = false
     @State private var picked: String?
     @State private var showReserveLink = false
+    @State private var query = ""
+    @AppStorage(SettingsKey.serversSort) private var sort: ServersSort = .subscription
 
     private let autoID = "__auto"
+    /// Поиск появляется, когда серверов много.
+    private var searchEnabled: Bool { app.routes.count > 8 }
+    private var searching: Bool { searchEnabled && !query.trimmingCharacters(in: .whitespaces).isEmpty }
 
     var body: some View {
         NavigationStack {
             List {
-                Section {
-                    autoRow
-                        .stagger(0, appeared: appeared, reduce: reduceMotion)
-                } footer: {
-                    Text("Рекомендуем: «Авто» само переключится, если сменится сеть или сервер перестанет отвечать.")
-                }
+                leadSections
 
                 if app.routes.isEmpty {
                     Section {
@@ -36,7 +36,7 @@ struct ServersSheet: View {
                 }
 
                 ForEach(Array([RouteGroup.regular, .bridge].enumerated()), id: \.element) { gi, group in
-                    let items = app.routes.filter { $0.group == group }
+                    let items = arranged(app.routes.filter { $0.group == group })
                     if !items.isEmpty {
                         Section {
                             ForEach(Array(items.enumerated()), id: \.element.id) { i, route in
@@ -46,7 +46,11 @@ struct ServersSheet: View {
                         } header: {
                             Text(group.title)
                         } footer: {
-                            if group == .bridge { Text(group.subtitle) }
+                            if group == .bridge {
+                                Text(group.subtitle)
+                            } else if app.favorites.isEmpty, !searching {
+                                Text("Смахните сервер вправо — он появится в «Избранном» наверху.")
+                            }
                         }
                     }
                 }
@@ -69,6 +73,18 @@ struct ServersSheet: View {
                     .accessibilityLabel("Измерить связь")
                 }
                 ToolbarItem(placement: .topBarTrailing) {
+                    Menu {
+                        Picker("Порядок", selection: $sort) {
+                            ForEach(ServersSort.allCases) { option in
+                                Label(option.title, systemImage: option.icon).tag(option)
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "arrow.up.arrow.down")
+                    }
+                    .accessibilityLabel("Порядок серверов")
+                }
+                ToolbarItem(placement: .topBarTrailing) {
                     Button { dismiss() } label: { Image(systemName: "xmark") }
                         .accessibilityLabel("Закрыть")
                 }
@@ -77,6 +93,9 @@ struct ServersSheet: View {
                 await app.refreshSubscription()
                 await app.pingAll()
             }
+            .modifier(ServerSearch(enabled: searchEnabled, text: $query))
+            .animation(.default, value: sort)
+            .animation(.default, value: app.favorites)
         }
         .tint(Theme.ink)
         .presentationDetents([.large])
@@ -91,6 +110,39 @@ struct ServersSheet: View {
     }
 
     // MARK: Строки
+
+    /// «Авто» и избранное; во время поиска — подсказка, если ничего не нашлось.
+    @ViewBuilder private var leadSections: some View {
+        if !searching {
+            Section {
+                autoRow
+                    .stagger(0, appeared: appeared, reduce: reduceMotion)
+            } footer: {
+                Text("Рекомендуем: «Авто» само переключится, если сменится сеть или сервер перестанет отвечать.")
+            }
+
+            let favorites = arranged(app.routes.filter { app.isFavorite($0) })
+            if !favorites.isEmpty {
+                Section {
+                    ForEach(favorites) { route in
+                        row(route)
+                            .stagger(1, appeared: appeared, reduce: reduceMotion)
+                    }
+                } header: {
+                    Text("Избранное")
+                }
+            }
+        } else if arranged(app.routes).isEmpty {
+            Section {
+                HStack(spacing: 12) {
+                    Image(systemName: "magnifyingglass").foregroundStyle(Theme.label2)
+                    Text("Ничего не нашли").foregroundStyle(Theme.label2)
+                }
+            } footer: {
+                Text("Попробуйте название страны или города.")
+            }
+        }
+    }
 
     private var isAutoSelected: Bool { picked.map { $0 == autoID } ?? app.autoMode }
 
@@ -134,11 +186,20 @@ struct ServersSheet: View {
         let measuring = app.pingingIDs.contains(route.id)
         let q = route.quality
         let isCurrent = live && app.connectedRouteID == route.id
+        let favorite = app.isFavorite(route)
         return Button { choose(route) } label: {
             HStack(spacing: 12) {
                 Flag(emoji: route.emoji)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(route.title).font(.sc(17, .medium, relativeTo: .body)).foregroundStyle(q == 0 && !measuring ? Theme.label2 : Theme.label)
+                    HStack(spacing: 5) {
+                        Text(route.title).font(.sc(17, .medium, relativeTo: .body)).foregroundStyle(q == 0 && !measuring ? Theme.label2 : Theme.label)
+                        if favorite {
+                            Image(systemName: "star.fill")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(Theme.orange)
+                                .accessibilityHidden(true)
+                        }
+                    }
                     Text(route.humanDetail + (isCurrent && app.autoMode ? " · сейчас" : ""))
                         .font(.scFoot)
                         .foregroundStyle(Theme.label2)
@@ -157,14 +218,51 @@ struct ServersSheet: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("\(route.title), \(route.humanDetail), связь \(measuring ? "меряем" : Quality.word(q))")
+        .swipeActions(edge: .leading, allowsFullSwipe: true) { favoriteButton(route, favorite) }
+        .contextMenu { favoriteButton(route, favorite) }
+        .accessibilityLabel("\(route.title)\(favorite ? ", избранный" : ""), \(route.humanDetail), связь \(measuring ? "меряем" : Quality.word(q))")
+        .accessibilityAction(named: favorite ? "Убрать из избранного" : "В избранное") { app.toggleFavorite(route) }
+    }
+
+    private func favoriteButton(_ route: Route, _ favorite: Bool) -> some View {
+        Button {
+            withAnimation { app.toggleFavorite(route) }
+        } label: {
+            Label(favorite ? "Убрать из избранного" : "В избранное", systemImage: favorite ? "star.slash" : "star")
+        }
+        .tint(Theme.orange)
+    }
+
+    // MARK: Порядок и поиск
+
+    /// Фильтр поиска и выбранный порядок. «По скорости»: быстрые сверху, недоступные в конце.
+    private func arranged(_ routes: [Route]) -> [Route] {
+        var list = routes
+        let text = query.trimmingCharacters(in: .whitespaces)
+        if searchEnabled, !text.isEmpty {
+            list = list.filter {
+                $0.title.localizedCaseInsensitiveContains(text)
+                    || $0.detail.localizedCaseInsensitiveContains(text)
+                    || $0.remarks.localizedCaseInsensitiveContains(text)
+            }
+        }
+        guard sort == .speed else { return list }
+        return list.enumerated().sorted { a, b in
+            let ka = speedKey(a.element), kb = speedKey(b.element)
+            return ka != kb ? ka < kb : a.offset < b.offset
+        }.map(\.element)
+    }
+
+    private func speedKey(_ route: Route) -> Int {
+        if route.unavailable || route.quality == 0 { return Int.max }
+        return route.ping ?? (Int.max - 1)
     }
 
     // MARK: Резерв
 
     @ViewBuilder private var reserveSection: some View {
         let group = RouteGroup.reserve
-        let items = app.routes.filter { $0.group == group }
+        let items = arranged(app.routes.filter { $0.group == group })
         if !items.isEmpty {
             Section {
                 ForEach(items) { route in row(route) }
@@ -173,7 +271,7 @@ struct ServersSheet: View {
             } footer: {
                 Text(group.subtitle)
             }
-        } else if !app.routes.isEmpty {
+        } else if !app.routes.isEmpty, !searching {
             Section {
                 if let reserve = app.reserve {
                     Button { openURL(Config.botLink(start: "traffic")) } label: {
@@ -209,6 +307,28 @@ struct ServersSheet: View {
             dismiss()
             try? await Task.sleep(for: .milliseconds(350))
             app.choose(route)
+        }
+    }
+}
+
+/// Порядок серверов в шторке.
+enum ServersSort: String, CaseIterable, Identifiable {
+    case subscription, speed
+    var id: String { rawValue }
+    var title: String { self == .subscription ? "Как в подписке" : "По скорости" }
+    var icon: String { self == .subscription ? "list.bullet" : "speedometer" }
+}
+
+/// Поиск по серверам — только когда их много (иначе лишнее поле).
+private struct ServerSearch: ViewModifier {
+    let enabled: Bool
+    @Binding var text: String
+
+    @ViewBuilder func body(content: Content) -> some View {
+        if enabled {
+            content.searchable(text: $text, placement: .navigationBarDrawer(displayMode: .automatic), prompt: "Страна или город")
+        } else {
+            content
         }
     }
 }

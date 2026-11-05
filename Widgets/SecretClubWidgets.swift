@@ -23,12 +23,34 @@ struct VPNEntry: TimelineEntry {
     var pingMS: Int?
     var healthy: Bool?
     var auto = false
+    /// Сети нет (по последней проверке расширения).
+    var offline = false
+    /// Подписка (из общей папки, если она есть): окончание и можно ли подключаться.
+    var subscriptionEnds: Date?
+    var lifetime = false
+    var usable = true
 
     var isOn: Bool { status.isOn }
 
+    /// Подписка закончилась, а VPN выключен — вместо «Включить» ведём продлевать.
+    var expired: Bool {
+        guard !isOn else { return false }
+        if !usable { return true }
+        if let end = subscriptionEnds, !lifetime { return end < date }
+        return false
+    }
+
+    /// Сколько дней подписки осталось, если мало (до 5).
+    var daysLeft: Int? {
+        guard let end = subscriptionEnds, !lifetime, end > date else { return nil }
+        let days = Int(ceil(end.timeIntervalSince(date) / 86400))
+        return days <= 5 ? days : nil
+    }
+
     var headline: String {
+        if expired { return "Подписка кончилась" }
         switch status {
-        case .on: return healthy == false ? "Нет ответа" : "Защищено"
+        case .on: return offline ? "Нет сети" : (healthy == false ? "Нет ответа" : "Защищено")
         case .connecting: return "Подключение…"
         case .off: return "Выключено"
         case .missing: return "Не настроен"
@@ -37,6 +59,7 @@ struct VPNEntry: TimelineEntry {
 
     var serverLine: String {
         if status == .missing { return "Откройте приложение" }
+        if expired { return "Продлите в приложении" }
         let name = [flag, server].compactMap { $0 }.joined(separator: " ")
         if name.isEmpty { return auto ? "Авто" : "SecretClub" }
         return name
@@ -53,10 +76,16 @@ struct VPNEntry: TimelineEntry {
         let title = (snap.status.isOn && fresh && shared?.running == true ? shared?.routeTitle : nil) ?? snap.routeTitle ?? shared?.routeTitle
         let parts = SharedStatus.split(title)
         let live = snap.status == .on && fresh && shared?.running == true
+        let group = AppGroup.defaults
+        let ends = group?.double(forKey: SharedKey.subscriptionEnds) ?? 0
         return VPNEntry(date: Date(), status: snap.status, flag: parts.flag, server: parts.name,
                         since: snap.status == .on ? (snap.connectedDate ?? shared?.since) : nil,
                         pingMS: live ? shared?.pingMS : nil, healthy: live ? shared?.healthy : nil,
-                        auto: shared?.auto ?? false)
+                        auto: shared?.auto ?? false,
+                        offline: live && shared?.network == "offline",
+                        subscriptionEnds: ends > 0 ? Date(timeIntervalSince1970: ends) : nil,
+                        lifetime: group?.bool(forKey: SharedKey.subscriptionLifetime) ?? false,
+                        usable: group?.object(forKey: SharedKey.subscriptionUsable) as? Bool ?? true)
     }
 }
 
@@ -74,9 +103,18 @@ struct VPNProvider: TimelineProvider {
     func getTimeline(in context: Context, completion: @escaping (Timeline<VPNEntry>) -> Void) {
         Task {
             let entry = await VPNEntry.current()
-            // Подключение идёт — заглянем скоро; иначе приложение само обновит виджет при изменениях.
-            let next: TimeInterval = entry.status == .connecting ? 4 : 15 * 60
-            completion(Timeline(entries: [entry], policy: .after(Date().addingTimeInterval(next))))
+            // Подключение идёт — заглянем скоро; иначе виджет обновят само расширение VPN и приложение
+            // (при каждом изменении), а этот запас — на случай, если обновление не дошло.
+            let next: TimeInterval = entry.status == .connecting ? 5 : (entry.isOn ? 20 * 60 : 60 * 60)
+            var entries = [entry]
+            // Подписка закончится раньше следующего обновления — заранее готовим вид «кончилась».
+            if let end = entry.subscriptionEnds, !entry.lifetime, end > entry.date,
+               end < entry.date.addingTimeInterval(next) {
+                var after = entry
+                after.date = end.addingTimeInterval(1)
+                entries.append(after)
+            }
+            completion(Timeline(entries: entries, policy: .after(Date().addingTimeInterval(next))))
         }
     }
 }
@@ -99,8 +137,9 @@ enum WidgetTheme {
     }
 
     static func dot(_ entry: VPNEntry) -> Color {
+        if entry.expired { return red }
         switch entry.status {
-        case .on: return entry.healthy == false ? red : green
+        case .on: return entry.healthy == false || entry.offline ? red : green
         case .connecting: return amber
         case .off, .missing: return Color.white.opacity(0.35)
         }
@@ -114,8 +153,9 @@ struct StatusWidget: Widget {
 
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: kind, provider: VPNProvider()) { entry in
+            // Маленький виджет нажимается целиком (ссылки внутри не работают): подписка кончилась — ведём продлевать.
             StatusWidgetView(entry: entry)
-                .widgetURL(URL(string: "secretclub://home"))
+                .widgetURL(entry.expired ? WidgetLinks.subscription : WidgetLinks.home)
         }
         .configurationDisplayName("SecretClub")
         .description("Состояние VPN, сервер и кнопка включения.")
@@ -206,24 +246,55 @@ private struct SmallView: View {
             DetailsBlock(entry: entry)
             Spacer(minLength: 8)
             if entry.status == .missing {
-                capsule(title: "Открыть", icon: "arrow.up.forward.app", filled: true)
+                CapsuleLabel(title: "Открыть", icon: "arrow.up.forward.app", filled: true)
+            } else if entry.expired {
+                CapsuleLabel(title: "Продлить", icon: "creditcard", filled: true)
             } else {
-                Button(intent: SetVPNIntent(value: !entry.isOn)) {
-                    capsule(title: entry.isOn ? "Выключить" : "Включить", icon: "power", filled: !entry.isOn)
-                }
-                .buttonStyle(.plain)
+                // Переключатель, а не кнопка: iOS сразу показывает новое положение, не дожидаясь VPN.
+                Toggle(isOn: entry.isOn, intent: SetVPNIntent(value: !entry.isOn)) { Text("VPN") }
+                    .toggleStyle(CapsuleToggleStyle())
             }
         }
     }
+}
 
-    private func capsule(title: String, icon: String, filled: Bool) -> some View {
+enum WidgetLinks {
+    static let home = URL(string: "secretclub://home")!
+    static let subscription = URL(string: "secretclub://subscription")!
+    static let servers = URL(string: "secretclub://servers")!
+}
+
+/// Капсула «Включить / Выключить».
+private struct CapsuleLabel: View {
+    @Environment(\.widgetRenderingMode) private var mode
+    let title: String
+    let icon: String
+    let filled: Bool
+
+    var body: some View {
+        let full = mode == .fullColor
         HStack(spacing: 6) {
             Image(systemName: icon).font(.system(size: 13, weight: .bold))
             Text(title).font(.system(size: 14, weight: .semibold)).lineLimit(1).minimumScaleFactor(0.8)
         }
-        .foregroundStyle(filled ? WidgetTheme.onAmber : .white)
+        .foregroundStyle(filled && full ? WidgetTheme.onAmber : .white)
         .frame(maxWidth: .infinity, minHeight: 34)
-        .background(filled ? AnyShapeStyle(WidgetTheme.amber) : AnyShapeStyle(Color.white.opacity(0.14)), in: Capsule())
+        .background(filled && full ? AnyShapeStyle(WidgetTheme.amber) : AnyShapeStyle(Color.white.opacity(filled ? 0.26 : 0.14)),
+                    in: Capsule())
+        .widgetAccentable(filled)
+    }
+}
+
+private struct CapsuleToggleStyle: ToggleStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        CapsuleLabel(title: configuration.isOn ? "Выключить" : "Включить", icon: "power", filled: !configuration.isOn)
+    }
+}
+
+private struct DiscToggleStyle: ToggleStyle {
+    let connecting: Bool
+    func makeBody(configuration: Configuration) -> some View {
+        PowerDisc(on: configuration.isOn, connecting: connecting && configuration.isOn)
     }
 }
 
@@ -242,14 +313,20 @@ private struct MediumView: View {
                     .foregroundStyle(.white.opacity(0.45))
                     .lineLimit(1)
             }
-            if entry.status != .missing {
-                Button(intent: SetVPNIntent(value: !entry.isOn)) { PowerDisc(on: entry.isOn, connecting: entry.status == .connecting) }
-                    .buttonStyle(.plain)
+            if entry.expired {
+                Link(destination: WidgetLinks.subscription) { PowerDisc(on: false, connecting: false, icon: "creditcard") }
+            } else if entry.status != .missing {
+                Toggle(isOn: entry.isOn, intent: SetVPNIntent(value: !entry.isOn)) { Text("VPN") }
+                    .toggleStyle(DiscToggleStyle(connecting: entry.status == .connecting))
             }
         }
     }
 
     private var footer: String {
+        if entry.expired { return "Нажмите, чтобы продлить" }
+        if let days = entry.daysLeft {
+            return "Подписка: ещё \(days) \(days == 1 ? "день" : (days < 5 ? "дня" : "дней"))"
+        }
         switch entry.status {
         case .on: return entry.auto ? "Авто: сервер выбирается сам" : "Сервер выбран вручную"
         case .connecting: return "Ищем лучший сервер"
@@ -260,13 +337,16 @@ private struct MediumView: View {
 }
 
 private struct PowerDisc: View {
+    @Environment(\.widgetRenderingMode) private var mode
     let on: Bool
     let connecting: Bool
+    var icon = "power"
 
     var body: some View {
+        let full = mode == .fullColor
         ZStack {
             Circle()
-                .fill(on && !connecting ? AnyShapeStyle(WidgetTheme.amber) : AnyShapeStyle(Color.white.opacity(0.1)))
+                .fill(on && !connecting ? AnyShapeStyle(full ? WidgetTheme.amber : Color.white.opacity(0.3)) : AnyShapeStyle(Color.white.opacity(0.1)))
             Circle()
                 .strokeBorder(WidgetTheme.amber.opacity(on ? 0.0 : 0.55), lineWidth: 2)
             if connecting {
@@ -276,9 +356,10 @@ private struct PowerDisc: View {
                     .rotationEffect(.degrees(-90))
                     .padding(3)
             }
-            Image(systemName: "power")
+            Image(systemName: icon)
                 .font(.system(size: 34, weight: .bold))
-                .foregroundStyle(on && !connecting ? WidgetTheme.onAmber : WidgetTheme.amber)
+                .foregroundStyle(full ? (on && !connecting ? WidgetTheme.onAmber : WidgetTheme.amber) : Color.white)
+                .widgetAccentable()
         }
         .frame(width: 92, height: 92)
         .shadow(color: WidgetTheme.amber.opacity(on ? 0.45 : 0), radius: 14)
@@ -289,17 +370,33 @@ private struct CircularView: View {
     let entry: VPNEntry
 
     var body: some View {
-        Button(intent: SetVPNIntent(value: !entry.isOn)) {
+        if entry.expired {
+            // Нажатие откроет продление (widgetURL).
             VStack(spacing: 1) {
-                Image(systemName: entry.isOn ? "lock.shield.fill" : "shield.slash")
+                Image(systemName: "exclamationmark.shield")
                     .font(.system(size: 20, weight: .semibold))
                     .widgetAccentable()
-                Text(entry.status == .on ? "Вкл" : (entry.status == .connecting ? "…" : "Выкл"))
-                    .font(.system(size: 11, weight: .semibold))
+                Text("Срок").font(.system(size: 11, weight: .semibold))
             }
+        } else {
+            Toggle(isOn: entry.isOn, intent: SetVPNIntent(value: !entry.isOn)) { Text("VPN") }
+                .toggleStyle(CircularToggleStyle(connecting: entry.status == .connecting))
+                .disabled(entry.status == .missing)
         }
-        .buttonStyle(.plain)
-        .disabled(entry.status == .missing)
+    }
+}
+
+private struct CircularToggleStyle: ToggleStyle {
+    let connecting: Bool
+    func makeBody(configuration: Configuration) -> some View {
+        let on = configuration.isOn
+        VStack(spacing: 1) {
+            Image(systemName: on ? "lock.shield.fill" : "shield.slash")
+                .font(.system(size: 20, weight: .semibold))
+                .widgetAccentable()
+            Text(on ? (connecting ? "…" : "Вкл") : "Выкл")
+                .font(.system(size: 11, weight: .semibold))
+        }
     }
 }
 

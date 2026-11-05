@@ -45,6 +45,18 @@ final class SharedModelTests: XCTestCase {
         XCTAssertEqual(TunnelCoding.decode(TunnelCommand.self, data)?.kind, .log)
     }
 
+    func testPoolUpdatedAtIsOptional() throws {
+        // Список от старого приложения (без даты) читается; новый сохраняет дату.
+        let old = #"{"auto":true,"candidates":[{"id":"fi","title":"fi","group":"regular","config":"{}"}]}"#
+        let decoded = try XCTUnwrap(TunnelCoding.decode(AutoPool.self, Data(old.utf8)))
+        XCTAssertNil(decoded.updatedAt)
+        XCTAssertEqual(decoded.candidates.map(\.id), ["fi"])
+        let date = Date(timeIntervalSince1970: 1_700_000_000)
+        let pool = AutoPool(auto: false, candidates: [], updatedAt: date)
+        let data = try XCTUnwrap(TunnelCoding.encode(pool))
+        XCTAssertEqual(TunnelCoding.decode(AutoPool.self, data)?.updatedAt, date)
+    }
+
     func testDiverseTakesTwoPerGroup() {
         func c(_ id: String, _ group: String) -> AutoCandidate { AutoCandidate(id: id, title: id, group: group, config: "{}") }
         let ranked = [c("r1", "regular"), c("r2", "regular"), c("r3", "regular"), c("b1", "bridge"), c("b2", "bridge"), c("s1", "reserve")]

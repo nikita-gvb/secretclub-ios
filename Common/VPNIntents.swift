@@ -2,8 +2,11 @@ import AppIntents
 import Foundation
 
 /// Команды для виджетов, Пункта управления, «Команд» и Siri. Выполняются без открытия приложения.
+/// Переключатели виджета и Пункта управления — LiveActivityIntent: iOS выполняет их в процессе самого
+/// приложения (запуская его в фоне), где права на VPN есть всегда, даже если сервис переподписи
+/// не выдал их расширению виджета.
 
-struct ToggleVPNIntent: AppIntent {
+struct ToggleVPNIntent: AppIntent, LiveActivityIntent {
     static let title: LocalizedStringResource = "Включить или выключить VPN"
     static let description = IntentDescription("Включает SecretClub, если VPN выключен, и выключает, если включён.")
 
@@ -54,7 +57,7 @@ struct VPNStatusIntent: AppIntent {
 }
 
 /// Переключатель с заданным значением — для виджета и Пункта управления.
-struct SetVPNIntent: SetValueIntent {
+struct SetVPNIntent: SetValueIntent, LiveActivityIntent {
     static let title: LocalizedStringResource = "VPN SecretClub"
     static let isDiscoverable = false
 
@@ -68,7 +71,7 @@ struct SetVPNIntent: SetValueIntent {
     }
 
     func perform() async throws -> some IntentResult {
-        try await VPNSwitch.set(value, source: "виджет")
+        try await VPNSwitch.set(value, source: "виджет или Пункт управления")
         return .result()
     }
 }

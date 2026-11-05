@@ -58,6 +58,17 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     var memoryKey: String?
     var networkFirstEvent: Date?
     var lastNetworkChange: Date?
+    /// Сеть (интерфейс и адрес), в которой ядро открыло свои соединения к серверу. Вернулись в ту же
+    /// сеть после «моргания» — соединения живы, ядро не перезапускаем.
+    var coreFingerprint: String?
+
+    // Память (лимит iOS для расширения — 50 МБ)
+    /// Экономный режим: меньше запасных серверов в ядре (была нехватка памяти).
+    var lean = false
+    /// Ядро уже перезапускали ради памяти в этом сеансе.
+    var shrunk = false
+    var lastFree: Date?
+    var memorySource: DispatchSourceMemoryPressure?
 
     // Проверки
     var watchdog: DispatchSourceTimer?
@@ -99,6 +110,12 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         if (options?[TunnelOption.probe] as? NSNumber)?.boolValue == true {
             work.async { self.report.probe = true; self.report.coreVersion = XrayEngine.version }
             setTunnelNetworkSettings(Self.probeSettings()) { completionHandler($0) }
+            // Пробный туннель гасим сами: приложение могли закрыть посреди проверки.
+            work.asyncAfter(deadline: .now() + 45) { [weak self] in
+                guard let self, self.report.probe, !self.stopped else { return }
+                DiagLog.write("пробный туннель: приложение не выключило его за 45 с — выключаем сами", to: .tunnel)
+                self.cancelTunnelWithError(nil)
+            }
             return
         }
 
@@ -130,7 +147,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 return
             }
             self.work.async {
-                self.loadPool(options?[TunnelOption.pool] as? String)
+                self.loadPool(options?[TunnelOption.pool] as? String, stored: stored?[TunnelOption.pool] as? String)
                 // Автоподключение без приложения: берём последний сервер, который сработал.
                 var target = Active(id: routeID, title: routeTitle, config: config)
                 if options?[TunnelOption.config] == nil, let last = self.memory.lastActive,
@@ -165,6 +182,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         guard let completion = startCompletion else { return }
         startCompletion = nil
         completion(nil)
+        WidgetRefresh.request(after: 1)
     }
 
     override func stopTunnel(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
@@ -183,6 +201,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             if Self.unexpected(reason) { DiagLog.warn(text, to: .tunnel) } else { DiagLog.write(text, to: .tunnel) }
             TunnelSession.end()
             self.publishStatus()
+            WidgetRefresh.now()
             DiagLog.flush()
             completionHandler()
         }
@@ -225,7 +244,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         case .status:
             respond(completionHandler) {
                 self.updateCounters()
-                self.report.memoryMB = Self.footprintMB
+                self.trackMemory()
             }
         case .pool:
             respond(completionHandler) {
@@ -301,6 +320,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             updateCounters()
             XrayEngine.stopSync()
             report.running = false
+            if lean { XrayEngine.freeMemory() }
         }
         // Новое ядро начнёт счёт с нуля — продолжаем от уже накопленного.
         trafficBase = (report.uplink, report.downlink, serverDown)
@@ -355,6 +375,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         active = target
         counterNames = CoreConfig.counterNames(target.config)
         launchedAt = Date()
+        if let fp = pathFingerprint, fp != "none" { coreFingerprint = fp }
         report.routeID = target.id
         report.routeTitle = target.title
         report.running = true
@@ -399,7 +420,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     /// Какие запасные серверы держать в ядре: по нескольку лучших из каждой группы.
     func extrasFor(_ activeID: String?) -> [(id: String, config: String)] {
         guard let pool, pool.auto else { return [] }
-        let limits = ["regular": 5, "bridge": 4, "reserve": 3]
+        // Экономный режим (была нехватка памяти) — по 1–2 запасных из группы.
+        let limits = lean ? ["regular": 2, "bridge": 2, "reserve": 1] : ["regular": 5, "bridge": 4, "reserve": 3]
         var counts: [String: Int] = [:]
         var out: [(id: String, config: String)] = []
         for candidate in pool.candidates where candidate.id != activeID {
@@ -509,8 +531,13 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         status.auto = pool?.auto
         status.since = status.running ? sessionStart : nil
         guard !status.same(as: lastStatus) else { return }
+        // Виджетам важно: включён ли, какой сервер, отвечает ли, есть ли сеть (пинг — не повод тратить обновление).
+        let previous = lastStatus
+        let visible = previous == nil || previous?.running != status.running || previous?.routeID != status.routeID
+            || previous?.healthy != status.healthy || previous?.network != status.network
         status.save()
         lastStatus = status
+        if visible { WidgetRefresh.request() }
     }
 
     /// Прошлый сеанс не закрылся через stopTunnel — расширение завершилось аварийно (память, сбой). На очереди work.
@@ -523,6 +550,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         let time = DateFormatter.localizedString(from: previous.alive, dateStyle: .short, timeStyle: .short)
         var detail = "Последний признак жизни \(time), сервер «\(previous.route ?? "?")», память до \(Int(previous.peakMB.rounded())) МБ, ядро \(previous.version)."
         if previous.peakMB >= 44 { detail += " Похоже, iOS выгрузила VPN из-за лимита памяти (50 МБ)." }
+        if previous.peakMB >= 38 {
+            // Прошлый сеанс упал с большой памятью — этот начинаем экономно.
+            lean = true
+            detail += " Этот сеанс — экономный режим: меньше запасных серверов в ядре."
+        }
         DiagLog.warn("прошлый сеанс VPN завершился аварийно: \(detail)", to: .tunnel)
         Incidents.add(Incident(id: "tunnel-\(Int(previous.started.timeIntervalSince1970))", date: previous.alive, source: .tunnel,
                                title: "VPN завершился аварийно", detail: detail))
@@ -539,7 +571,22 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     /// Сторож памяти: пик за сеанс, запись в журнал при заметном росте. На очереди work.
     func trackMemory() {
-        guard let mb = Self.footprintMB else { return }
+        guard var mb = Self.footprintMB else { return }
+        // Ближе к лимиту — сразу возвращаем свободную память ядра (не ждём его 10-секундного таймера).
+        if mb >= Self.freeAtMB, lastFree.map({ Date().timeIntervalSince($0) > 5 }) ?? true {
+            lastFree = Date()
+            XrayEngine.freeMemory()
+            let after = Self.footprintMB ?? mb
+            if mb >= 40 {
+                DiagLog.warn("память расширения \(Int(mb.rounded())) МБ → \(Int(after.rounded())) МБ после освобождения", to: .tunnel)
+            }
+            if mb >= 40, !lean {
+                lean = true
+                event("экономный режим памяти: дальше меньше запасных серверов в ядре")
+            }
+            if after >= 43 { shrinkIfNeeded(after) }
+            mb = max(mb, after)
+        }
         report.memoryMB = mb
         guard mb > peakMB else { return }
         let grew = mb - peakMB >= 1
@@ -550,6 +597,40 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             if mb >= 40 { DiagLog.warn(text + " (лимит iOS — 50 МБ)", to: .tunnel) } else { DiagLog.write(text, to: .tunnel) }
         }
         if grew { touchSession(force: true) }
+    }
+
+    /// С какой памяти освобождать её сразу.
+    static let freeAtMB: Double = 34
+
+    /// Память у самого лимита: перезапуск ядра с меньшим числом запасных (лучше секунда без сети,
+    /// чем iOS выгрузит VPN целиком). Один раз за сеанс. На очереди work.
+    func shrinkIfNeeded(_ mb: Double) {
+        guard !shrunk, report.running, !evaluating, startCompletion == nil, !stopped, let current = active,
+              extraPorts.count > 5 else { return }
+        shrunk = true
+        lean = true
+        event("память \(Int(mb.rounded())) МБ у лимита — перезапуск ядра с меньшим числом запасных")
+        do {
+            try launch(current)
+        } catch {
+            report.error = error.localizedDescription
+            DiagLog.warn("ядро не перезапустилось после нехватки памяти: \(error.localizedDescription)", to: .tunnel)
+            scheduleRetry()
+        }
+    }
+
+    /// Сигнал iOS о нехватке памяти в системе. На очереди work.
+    func memoryPressure(critical: Bool) {
+        lastFree = Date()
+        XrayEngine.freeMemory()
+        let mb = Self.footprintMB ?? 0
+        report.memoryMB = mb
+        DiagLog.warn("iOS: \(critical ? "критическая " : "")нехватка памяти, у VPN \(Int(mb.rounded())) МБ — освобождаем", to: .tunnel)
+        if !lean {
+            lean = true
+            event("экономный режим памяти: дальше меньше запасных серверов в ядре")
+        }
+        if critical || mb >= 40 { shrinkIfNeeded(mb) }
     }
 
     static let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"

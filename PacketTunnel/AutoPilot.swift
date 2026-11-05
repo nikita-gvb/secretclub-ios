@@ -122,6 +122,8 @@ extension PacketTunnelProvider {
         /// Можно сменить рабочий сервер на заметно более быстрый из той же группы.
         let compare: Bool
         let classify: Bool
+        /// Сеть вернулась та же — ядро не перезапускали; рабочий молчит — тогда перезапуск.
+        let blip: Bool
         let freeze: Bool
         let activeThrottled: Bool
         /// Ядро без общего конфига: запасные проверяем по одному.
@@ -150,14 +152,22 @@ extension PacketTunnelProvider {
             .appendingPathComponent("auto-pool.json")
     }
 
-    /// Список кандидатов: из опций запуска (свежий от приложения) или сохранённый (автоподключение).
-    func loadPool(_ text: String?) {
+    /// Список кандидатов: из опций запуска (свежий от приложения), иначе — более свежий из сохранённого
+    /// расширением и записанного приложением в профиль VPN (запуск из виджета, автоподключение).
+    func loadPool(_ text: String?, stored: String? = nil) {
         if let text, let pool = TunnelCoding.decode(AutoPool.self, Data(text.utf8)) {
             self.pool = pool
             Self.savePool(pool)
-        } else if let url = Self.poolURL, let data = try? Data(contentsOf: url) {
-            pool = TunnelCoding.decode(AutoPool.self, data)
+            return
         }
+        let file = Self.poolURL.flatMap { try? Data(contentsOf: $0) }.flatMap { TunnelCoding.decode(AutoPool.self, $0) }
+        let profile = stored.flatMap { TunnelCoding.decode(AutoPool.self, Data($0.utf8)) }
+        if let file, let profile {
+            pool = (profile.updatedAt ?? .distantPast) > (file.updatedAt ?? .distantPast) ? profile : file
+        } else {
+            pool = file ?? profile
+        }
+        if let pool, pool.updatedAt == profile?.updatedAt, profile != nil { Self.savePool(pool) }
     }
 
     static func savePool(_ pool: AutoPool) {
@@ -176,6 +186,15 @@ extension PacketTunnelProvider {
             monitor.start(queue: work)
             pathMonitor = monitor
         }
+        if memorySource == nil {
+            let source = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: work)
+            source.setEventHandler { [weak self] in
+                guard let self, let event = self.memorySource?.data else { return }
+                self.memoryPressure(critical: event.contains(.critical))
+            }
+            source.resume()
+            memorySource = source
+        }
         startWatchdog()
     }
 
@@ -183,6 +202,8 @@ extension PacketTunnelProvider {
     func stopMonitoring() {
         pathMonitor?.cancel()
         pathMonitor = nil
+        memorySource?.cancel()
+        memorySource = nil
         stopWatchdog()
         pendingCheck?.cancel()
         pendingCheck = nil
@@ -214,6 +235,8 @@ extension PacketTunnelProvider {
         pathFingerprint = fingerprint
         pathSignature = signature
         if signature != "none" { memoryKey = NetworkCheck.memoryKey(path) }
+        // Ядро запустилось раньше, чем пришло первое состояние сети, — это и есть его сеть.
+        if coreFingerprint == nil, fingerprint != "none", report.running { coreFingerprint = fingerprint }
         guard let previous, previous != fingerprint else { return }
         // Тот же интерфейс просто получил адрес сразу после смены — это та же смена сети.
         let recent = lastNetworkChange.map { Date().timeIntervalSince($0) < 5 } ?? false
@@ -336,10 +359,16 @@ extension PacketTunnelProvider {
         evaluating = true
         report.checking = true
         let reason = requested
+        var blip = false
         if reason == .network {
             networkFirstEvent = nil
-            // Свежие соединения вместо протухших (XHTTP/gRPC держат их долго и «висят» после смены сети).
-            if let at = launchedAt, Date().timeIntervalSince(at) > 2 {
+            if let core = coreFingerprint, core == pathFingerprint {
+                // Сеть «моргнула» и вернулась та же (тот же интерфейс и адрес): соединения ядра живы —
+                // не рвём их перезапуском, только быстро проверяем рабочий сервер.
+                blip = true
+                event("сеть вернулась та же (\(Self.kindOf(core))) — без перезапуска ядра")
+            } else if let at = launchedAt, Date().timeIntervalSince(at) > 2 {
+                // Свежие соединения вместо протухших (XHTTP/gRPC держат их долго и «висят» после смены сети).
                 do {
                     try launch(current)
                 } catch {
@@ -367,9 +396,10 @@ extension PacketTunnelProvider {
         // Подозрение на обрыв сначала проверяем лёгким запросом через рабочий сервер; не ответил — всех.
         let broad: Set<CheckReason> = [.start, .network, .retry]
         return CheckContext(reason: reason, auto: auto, activeProbe: probe, activeGroup: activeGroup, extras: extras,
-                            broad: auto && broad.contains(reason),
-                            compare: reason == .start || reason == .network,
-                            classify: reason == .start || reason == .network || reason == .retry,
+                            broad: auto && broad.contains(reason) && !blip,
+                            compare: (reason == .start || reason == .network) && !blip,
+                            classify: (reason == .start || reason == .network || reason == .retry) && !blip,
+                            blip: blip,
                             freeze: freeze, activeThrottled: current.id.map { throttled.contains($0) } ?? false,
                             single: multiBroken,
                             preferred: hint?.best, unprobed: unprobed && !multiBroken, started: DispatchTime.now())
@@ -389,8 +419,24 @@ extension PacketTunnelProvider {
         }
         if ctx.classify { classify() }
 
-        var survey = await Self.survey([ctx.activeProbe] + (ctx.broad ? ctx.extras : []), box: box, timeout: 4, compare: ctx.compare)
-        if survey.activeMS == nil, ctx.auto, !ctx.broad, !ctx.extras.isEmpty {
+        var survey = await Self.survey([ctx.activeProbe] + (ctx.broad ? ctx.extras : []), box: box,
+                                       timeout: ctx.blip ? 2.5 : 4, compare: ctx.compare)
+        if ctx.blip, survey.activeMS == nil {
+            // Сеть та же, а рабочий молчит — соединения всё-таки протухли: обычная проверка смены сети
+            // (перезапуск ядра — у запасных при этом новые проверочные порты, поэтому контекст собираем заново).
+            let fresh = await onWork { () -> CheckContext? in
+                self.event("после «моргания» сети рабочий не ответил — перезапуск ядра")
+                self.coreFingerprint = nil
+                self.evaluating = false
+                return self.beginCheck(.network)
+            }
+            guard let fresh else { return }
+            ctx = fresh
+            if ctx.classify { classify() }
+            survey = await Self.survey([ctx.activeProbe] + (ctx.broad ? ctx.extras : []), box: box, timeout: 4, compare: ctx.compare)
+        }
+        await onWork { self.trackMemory() }
+        if survey.activeMS == nil, ctx.auto, !ctx.broad, !ctx.blip, !ctx.extras.isEmpty {
             // Рабочий не ответил на лёгкой проверке — проверяем все разом (и его ещё раз).
             classify()
             survey = await Self.survey([ctx.activeProbe] + ctx.extras, box: box, timeout: 4, compare: false)

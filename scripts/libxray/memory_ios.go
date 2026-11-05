@@ -3,7 +3,7 @@
 // SecretClub: замена memory/memory_ios.go из libXray.
 // В оригинале горутина вызывает debug.FreeOSMemory() каждую секунду, пока жив процесс,
 // и GOGC=10 — процессор просыпается постоянно, даже когда трафика нет (батарея).
-// Здесь: раз в 20 с смотрим, сколько памяти удерживает рантайм, и отдаём её системе,
+// Здесь: раз в 10 с смотрим, сколько памяти удерживает рантайм, и отдаём её системе,
 // только если много. Жёсткий предел 30 МБ (у расширения iOS лимит 50 МБ) остаётся.
 package memory
 
@@ -17,8 +17,8 @@ import (
 const (
 	gcPercent     = 30
 	maxMemory     = 30 * 1024 * 1024
-	freeAbove     = 22 * 1024 * 1024
-	checkInterval = 20 * time.Second
+	freeAbove     = 20 * 1024 * 1024
+	checkInterval = 10 * time.Second
 )
 
 var initForceFreeOnce sync.Once

@@ -43,6 +43,15 @@ enum SettingsKey {
     static let selectedRoute = "selectedRoute"
     static let connectedRoute = "connectedRoute"
     static let appearance = "appearance"
+    static let reminders = "subscriptionReminders"
+    static let favorites = "favoriteRoutes"
+    static let serversSort = "serversSort"
+}
+
+/// Настройки со значением по умолчанию «включено» (UserDefaults.bool вернул бы false).
+enum AppSettings {
+    /// «Держать VPN включённым»: если VPN оборвётся или iOS выгрузит расширение, система поднимет его сама.
+    static var autoConnect: Bool { UserDefaults.standard.object(forKey: SettingsKey.autoConnect) as? Bool ?? true }
 }
 
 /// Оформление: как в системе (по умолчанию), светлое или тёмное.

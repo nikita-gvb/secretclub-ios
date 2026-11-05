@@ -49,7 +49,11 @@ enum VPNSwitch {
 
     static func status() async -> Status { await snapshot().status }
 
+    /// Где выполняется команда: в приложении (iOS запускает его в фоне) или в расширении виджета.
+    static var process: String { Bundle.main.bundleURL.pathExtension == "appex" ? "виджет" : "приложение" }
+
     /// Включить или выключить. source — откуда (для журнала диагностики).
+    /// Ждёт итога (до ~15 с), чтобы виджет и Пункт управления сразу показали настоящее состояние.
     static func set(_ on: Bool, source: String) async throws {
         let m: NETunnelProviderManager
         do {
@@ -60,13 +64,16 @@ enum VPNSwitch {
         } catch let error as SwitchError {
             throw error
         } catch {
-            DiagLog.warn("\(source): профиль VPN не прочитан: \(error.localizedDescription)", to: .app)
+            DiagLog.warn("\(source) (\(process)): профиль VPN не прочитан: \(error.localizedDescription)", to: .app)
             throw SwitchError(message: "Не удалось прочитать настройки VPN: \(error.localizedDescription)")
         }
-        let autoConnect = AppGroup.defaults?.bool(forKey: SharedKey.autoConnect) ?? false
+        // Подписка закончилась — не держим VPN включённым насильно: без неё сервер не пустит,
+        // а постоянные попытки переподключения оставили бы телефон без интернета.
+        let usable = AppGroup.defaults?.object(forKey: SharedKey.subscriptionUsable) as? Bool ?? true
+        let autoConnect = SharedKey.keepOn && usable
         do {
             if on {
-                // Выключали отсюда же — возвращаем «Подключаться само», если оно включено в приложении.
+                // Выключали отсюда же — возвращаем «Держать VPN включённым», если оно включено в приложении.
                 let needsOnDemand = autoConnect && !m.isOnDemandEnabled
                 if !m.isEnabled || needsOnDemand {
                     m.isEnabled = true
@@ -83,22 +90,44 @@ enum VPNSwitch {
                 }
                 if status(of: m).isOn { return }
                 try m.connection.startVPNTunnel()
-                DiagLog.write("\(source): включение VPN", to: .app)
-                await wait(m, until: { $0 != .disconnected && $0 != .invalid }, timeout: 2)
+                DiagLog.write("\(source) (\(process)): включение VPN", to: .app)
+                // «Подключено» расширение сообщает после проверки сервера (обычно 1–3 с, не дольше 9 с).
+                let result = await outcome(m, timeout: 15)
+                if result != .connected {
+                    DiagLog.warn("\(source): VPN не включился (статус \(result.rawValue))", to: .app)
+                }
             } else {
-                // Иначе «Подключаться само» тут же включит VPN обратно.
+                // Иначе «Держать VPN включённым» тут же включит VPN обратно.
                 if m.isOnDemandEnabled {
                     m.isOnDemandEnabled = false
                     try await m.saveToPreferences()
                 }
                 m.connection.stopVPNTunnel()
-                DiagLog.write("\(source): выключение VPN", to: .app)
-                await wait(m, until: { $0 == .disconnected || $0 == .invalid }, timeout: 2)
+                DiagLog.write("\(source) (\(process)): выключение VPN", to: .app)
+                await wait(m, until: { $0 == .disconnected || $0 == .invalid }, timeout: 6)
             }
         } catch {
-            DiagLog.warn("\(source): не удалось \(on ? "включить" : "выключить") VPN: \(error.localizedDescription)", to: .app)
+            DiagLog.warn("\(source) (\(process)): не удалось \(on ? "включить" : "выключить") VPN: \(error.localizedDescription)", to: .app)
             throw SwitchError(message: "Не удалось \(on ? "включить" : "выключить") VPN: \(error.localizedDescription)")
         }
+    }
+
+    /// Итог включения: подключён, или туннель начал подниматься и снова выключился (ошибка), или таймаут.
+    private static func outcome(_ m: NETunnelProviderManager, timeout: Double) async -> NEVPNStatus {
+        let start = Date()
+        var moved = false
+        while Date().timeIntervalSince(start) < timeout {
+            let status = m.connection.status
+            switch status {
+            case .connected: return status
+            case .connecting, .reasserting, .disconnecting: moved = true
+            case .disconnected, .invalid:
+                if moved || Date().timeIntervalSince(start) > 3 { return status }
+            @unknown default: break
+            }
+            try? await Task.sleep(nanoseconds: 200_000_000)
+        }
+        return m.connection.status
     }
 
     /// Короткое ожидание, чтобы виджет сразу показал новое состояние.

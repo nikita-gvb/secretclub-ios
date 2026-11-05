@@ -3,7 +3,11 @@ package main
 
 import "C"
 
-import "github.com/xtls/libxray/xray"
+import (
+	"runtime/debug"
+
+	"github.com/xtls/libxray/xray"
+)
 
 // SecretClubCounter — значение счётчика статистики ядра; -1, если ядра или счётчика нет.
 //
@@ -30,4 +34,12 @@ func SecretClubSetBalancerTarget(balancer *C.char, target *C.char) C.int {
 		return 0
 	}
 	return 1
+}
+
+// SecretClubFreeMemory — сразу вернуть системе свободную память рантайма Go (сборка мусора + возврат страниц).
+// Расширение VPN зовёт при росте памяти к лимиту iOS (50 МБ) и по сигналу системы о нехватке памяти.
+//
+//export SecretClubFreeMemory
+func SecretClubFreeMemory() {
+	debug.FreeOSMemory()
 }

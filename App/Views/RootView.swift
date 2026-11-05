@@ -45,7 +45,9 @@ struct RootView: View {
             case .active:
                 AppearanceController.apply(appearance)
                 Task { await app.becameActive() }
-            case .background: app.vpn.setForeground(false)
+            case .background:
+                app.vpn.setForeground(false)
+                app.scheduleBackgroundRefresh()
             default: break
             }
         }

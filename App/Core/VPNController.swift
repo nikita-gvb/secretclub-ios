@@ -153,11 +153,7 @@ final class VPNController {
         proto.providerBundleIdentifier = Self.tunnelBundleID
         if let request {
             proto.serverAddress = request.routeTitle
-            proto.providerConfiguration = [
-                TunnelOption.config: request.config,
-                TunnelOption.routeID: request.routeID,
-                TunnelOption.routeTitle: request.routeTitle,
-            ]
+            proto.providerConfiguration = Self.stored(request)
             proto.includeAllNetworks = request.killSwitch
             proto.excludeLocalNetworks = true
             let rule = NEOnDemandRuleConnect()
@@ -176,6 +172,52 @@ final class VPNController {
         manager = m
         observe(m)
         return m
+    }
+
+    /// Что расширение возьмёт из профиля, если VPN включат без приложения (виджет, Пункт управления,
+    /// Настройки iOS, автоподключение): сервер и список запасных.
+    private static func stored(_ request: ConnectRequest) -> [String: Any] {
+        var conf: [String: Any] = [
+            TunnelOption.config: request.config,
+            TunnelOption.routeID: request.routeID,
+            TunnelOption.routeTitle: request.routeTitle,
+        ]
+        if let pool = request.pool { conf[TunnelOption.pool] = pool }
+        conf[Self.digestKey] = digest(request)
+        return conf
+    }
+
+    private static let digestKey = "digest"
+
+    /// Отпечаток настроек без времени сборки списка — чтобы не переписывать профиль VPN зря.
+    private static func digest(_ request: ConnectRequest) -> String {
+        var text = request.config + "|" + request.routeID
+        if let pool = request.pool, var decoded = TunnelCoding.decode(AutoPool.self, Data(pool.utf8)) {
+            decoded.updatedAt = nil
+            if let data = TunnelCoding.encode(decoded) { text += "|" + String(decoding: data, as: UTF8.self) }
+        }
+        return AppModel.digest(text)
+    }
+
+    /// Профиль VPN уже создан (подключались хотя бы раз).
+    var hasProfile: Bool { manager?.protocolConfiguration != nil }
+
+    /// Подписка обновилась, а VPN выключен: свежий сервер и запасные — в профиль, чтобы виджет
+    /// и автоподключение не включали VPN со старыми настройками. Работающий туннель не трогаем.
+    func store(_ request: ConnectRequest) async {
+        guard !isDemo, let m = manager, let proto = m.protocolConfiguration as? NETunnelProviderProtocol,
+              state == .disconnected || state == .invalid,
+              m.connection.status == .disconnected || m.connection.status == .invalid else { return }
+        if (proto.providerConfiguration?[Self.digestKey] as? String) == Self.digest(request) { return }
+        proto.providerConfiguration = Self.stored(request)
+        proto.serverAddress = request.routeTitle
+        m.protocolConfiguration = proto
+        do {
+            try await m.saveToPreferences()
+            DiagLog.write("профиль VPN: обновлены сервер «\(request.routeTitle)» и запасные для запуска без приложения", to: .app)
+        } catch {
+            DiagLog.warn("профиль VPN не обновлён: \(Self.describe(error))", to: .app)
+        }
     }
 
     func connect(_ request: ConnectRequest) async throws {
@@ -393,6 +435,8 @@ final class VPNController {
     /// Если выключен — поднимает пробный туннель без перехвата трафика.
     func selfTest() async -> [DiagnosticStep] {
         if isDemo { return DemoData.permissionSteps }
+        let background = BackgroundWork.begin("Проверка VPN")
+        defer { background.end() }
         var steps: [DiagnosticStep] = []
 
         if state == .connected {

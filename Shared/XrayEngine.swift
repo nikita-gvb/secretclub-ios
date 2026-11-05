@@ -81,6 +81,11 @@ enum XrayEngine {
         }
     }
 
+    /// Сразу вернуть системе свободную память ядра (наша сборка libXray).
+    static func freeMemory() {
+        SecretClubFreeMemory()
+    }
+
     static func runSync(_ config: String) throws {
         _ = try invokeSync("runXray", payload: ["xrayJson": config])
     }

@@ -2,12 +2,13 @@ import SwiftUI
 import UIKit
 
 enum SettingsRoute: Hashable {
-    case subscription, devices, appearance, exceptions, check, advanced, selfTest, diagnostics
+    case subscription, devices, appearance, exceptions, check, advanced, selfTest, diagnostics, widgets
 }
 
 struct SettingsView: View {
     @Environment(AppModel.self) private var app
-    @AppStorage(SettingsKey.autoConnect) private var autoConnect = false
+    @AppStorage(SettingsKey.autoConnect) private var autoConnect = true
+    @AppStorage(SettingsKey.reminders) private var reminders = true
     @AppStorage(SettingsKey.killSwitch) private var killSwitch = false
     @AppStorage(SettingsKey.ruDirect) private var ruDirect = true
     @AppStorage(SettingsKey.appearance) private var appearance: AppAppearance = .system
@@ -32,6 +33,15 @@ struct SettingsView: View {
                                 SettingsRow(icon: "iphone", color: Theme.blue, title: "Устройства", value: devicesValue)
                             }
                         }
+                        if !app.subscription.lifetime {
+                            Toggle(isOn: $reminders) {
+                                SettingsLabel(icon: "bell.badge.fill", color: .orange, title: "Напоминать о продлении")
+                            }
+                        }
+                    } footer: {
+                        if !app.subscription.lifetime {
+                            Text("Уведомим за 3 дня и за день до конца подписки — чтобы VPN не отключился внезапно.")
+                        }
                     }
                 } else {
                     Section {
@@ -47,13 +57,16 @@ struct SettingsView: View {
                         SettingsRow(icon: "circle.lefthalf.filled", color: .indigo, title: "Оформление", value: appearance.title)
                     }
                     Toggle(isOn: $autoConnect) {
-                        SettingsLabel(icon: "bolt.fill", color: Theme.green, title: "Подключаться само")
+                        SettingsLabel(icon: "bolt.fill", color: Theme.green, title: "Держать VPN включённым")
                     }
                     Toggle(isOn: $killSwitch) {
                         SettingsLabel(icon: "lock.fill", color: Theme.red, title: "Без VPN — без интернета")
                     }
+                    NavigationLink(value: SettingsRoute.widgets) {
+                        SettingsRow(icon: "square.grid.2x2.fill", color: Theme.blue, title: "Виджеты и Пункт управления")
+                    }
                 } footer: {
-                    Text("«Подключаться само» включит VPN, как только появится сеть. «Без VPN — без интернета» не выпустит трафик мимо VPN — сработает со следующего подключения.")
+                    Text("Включённый VPN поднимется сам, если оборвётся, iOS выгрузит его или телефон перезагрузится. Выключить — как обычно: кнопкой, виджетом или в Пункте управления. «Без VPN — без интернета» не выпустит трафик мимо VPN — сработает со следующего подключения.")
                 }
 
                 Section {
@@ -102,6 +115,7 @@ struct SettingsView: View {
                 case .advanced: AdvancedView()
                 case .selfTest: SelfTestView()
                 case .diagnostics: DiagnosticsCenter()
+                case .widgets: WidgetsHelpView()
                 }
             }
             .confirmationDialog("Выйти из аккаунта?", isPresented: $confirmLogout, titleVisibility: .visible) {
@@ -112,8 +126,10 @@ struct SettingsView: View {
             }
             .onChange(of: ruDirect) { app.settingsChanged() }
             .onChange(of: autoConnect) { _, on in app.autoConnectChanged(on) }
+            .onChange(of: reminders) { _, on in app.remindersChanged(on) }
             .sensoryFeedback(.selection, trigger: autoConnect)
             .sensoryFeedback(.selection, trigger: killSwitch)
+            .sensoryFeedback(.selection, trigger: reminders)
             .sensoryFeedback(.selection, trigger: ruDirect)
         }
     }

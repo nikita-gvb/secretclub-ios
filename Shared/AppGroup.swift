@@ -45,6 +45,13 @@ enum AppGroup {
 
 /// Ключи общих настроек (AppGroup.defaults) — их читают виджеты и команды.
 enum SharedKey {
-    /// «Подключаться само»: виджет, включая VPN, восстанавливает автоподключение.
+    /// «Держать VPN включённым»: виджет, включая VPN, восстанавливает автоподключение.
     static let autoConnect = "autoConnect"
+    /// Подписка: окончание (секунды с 1970; 0 — неизвестно), бессрочная, можно ли подключаться.
+    static let subscriptionEnds = "subscriptionEnds"
+    static let subscriptionLifetime = "subscriptionLifetime"
+    static let subscriptionUsable = "subscriptionUsable"
+
+    /// «Держать VPN включённым» — по умолчанию включено.
+    static var keepOn: Bool { AppGroup.defaults?.object(forKey: autoConnect) as? Bool ?? true }
 }

@@ -2,6 +2,7 @@ import SwiftUI
 import Observation
 import Network
 import CryptoKit
+import BackgroundTasks
 
 enum AppTab: String, Hashable {
     case home, settings
@@ -75,6 +76,8 @@ final class AppModel {
     var showServers = false
     /// Сбоев за 7 дней (MetricKit и аварийные завершения VPN) — для строки «Диагностика».
     var recentIncidents = 0
+    /// Избранные серверы (id = название из подписки — не меняется при обновлении).
+    var favorites: Set<String> = Set(UserDefaults.standard.stringArray(forKey: SettingsKey.favorites) ?? [])
 
     @ObservationIgnored private var configs: [String: [String: Any]] = [:]
     @ObservationIgnored private var primaryParsed: ParsedSubscription?
@@ -98,6 +101,11 @@ final class AppModel {
     @ObservationIgnored private var nodes: [String: NodeStatus] = [:]
     @ObservationIgnored private var nodesAt: Date?
     @ObservationIgnored private var toastTask: Task<Void, Never>?
+    /// Что последний раз отдали виджетам и напоминаниям о подписке.
+    @ObservationIgnored private var sharedSubscriptionKey: String?
+
+    /// Фоновое обновление подписки (BGAppRefreshTask): идентификатор есть в Info.plist.
+    static let refreshTaskID = "com.secretclub.app.refresh"
 
     let vpn = VPNController()
     let isDemo: Bool
@@ -160,6 +168,10 @@ final class AppModel {
         }
 
         vpn.onReport = { [weak self] report in self?.apply(report) }
+        if !isDemo {
+            Reminders.install { [weak self] url in self?.handle(url: url) }
+            shareSubscription()
+        }
 
         switch initialScreen {
         case "settings": selectedTab = .settings
@@ -225,7 +237,7 @@ final class AppModel {
     func start() async {
         guard !isDemo else { return }
         MetricsCollector.shared.start()
-        AppGroup.defaults?.set(defaults.bool(forKey: SettingsKey.autoConnect), forKey: SharedKey.autoConnect)
+        AppGroup.defaults?.set(AppSettings.autoConnect, forKey: SharedKey.autoConnect)
         DiagLog.write("запуск приложения \(Config.version), iOS \(UIDevice.current.systemVersion), общая папка: \(AppGroup.identifier ?? "нет")", to: .app)
         recentIncidents = await Task.detached { Incidents.recent().count }.value
         await vpn.load()
@@ -297,6 +309,7 @@ final class AppModel {
     }
 
     private func recomputeInfo() {
+        defer { if !isDemo { shareSubscription() } }
         if let s = account?.subscription, s.error == nil {
             subscription = SubscriptionInfo(account: s)
         } else if let meta {
@@ -329,6 +342,84 @@ final class AppModel {
         self.reserveError = reserveError
         rebuild()
         await syncPool()
+        await storeForBackgroundStart()
+    }
+
+    /// VPN выключен: кладём в профиль свежий сервер и запасные — их возьмёт расширение, если VPN
+    /// включат из виджета, Пункта управления, Настроек iOS или он поднимется сам.
+    private func storeForBackgroundStart() async {
+        guard !isDemo, vpn.hasProfile, !vpn.isActive, !routes.isEmpty else { return }
+        let route = autoMode ? initialAutoRoute() : routes.first { $0.id == selectedRouteID }
+        guard let route, var req = request(for: route) else { return }
+        req.pool = TunnelCoding.encode(makePool()).map { String(decoding: $0, as: UTF8.self) }
+        await vpn.store(req)
+    }
+
+    /// Срок подписки — виджетам (общая папка) и напоминаниям о продлении. Только если изменился.
+    private func shareSubscription() {
+        let info = subscription
+        let usable = subscriptionUsable
+        let key = "\(info.expiresAt?.timeIntervalSince1970 ?? 0)|\(info.lifetime)|\(usable)|\(Reminders.enabled)"
+        guard key != sharedSubscriptionKey else { return }
+        sharedSubscriptionKey = key
+        if let shared = AppGroup.defaults {
+            shared.set(info.expiresAt?.timeIntervalSince1970 ?? 0, forKey: SharedKey.subscriptionEnds)
+            shared.set(info.lifetime, forKey: SharedKey.subscriptionLifetime)
+            shared.set(usable, forKey: SharedKey.subscriptionUsable)
+            WidgetSync.reload()
+        }
+        Task { await Reminders.update(expiresAt: info.expiresAt, lifetime: info.lifetime) }
+        // Подписка закончилась — iOS не должна бесконечно поднимать VPN, который сервер не пустит
+        // (телефон остался бы без интернета). После продления «держать включённым» вернётся при подключении.
+        if !usable, isLoggedIn {
+            Task {
+                await vpn.setOnDemand(false)
+                DiagLog.write("подписка неактивна — автоподключение VPN приостановлено", to: .app)
+            }
+        }
+    }
+
+    /// Напоминания включили или выключили в настройках.
+    func remindersChanged(_ enabled: Bool) {
+        sharedSubscriptionKey = nil
+        if enabled {
+            Task {
+                let allowed = await Reminders.ask()
+                if !allowed { showToast("Уведомления выключены в Настройках iOS", icon: "bell.slash", tone: .bad) }
+                shareSubscription()
+            }
+        } else {
+            Reminders.cancelAll()
+        }
+    }
+
+    // MARK: - Фоновое обновление
+
+    /// Попросить iOS обновить подписку в фоне (часа через три). Вызывается при уходе в фон.
+    func scheduleBackgroundRefresh() {
+        guard !isDemo, isLoggedIn else { return }
+        let request = BGAppRefreshTaskRequest(identifier: Self.refreshTaskID)
+        request.earliestBeginDate = Date().addingTimeInterval(3 * 3600)
+        try? BGTaskScheduler.shared.submit(request)
+    }
+
+    /// Фоновое обновление: свежие серверы — работающему VPN (запасные) или в профиль (для виджета
+    /// и автоподключения), срок подписки — напоминаниям и виджетам. Приложение может быть даже не открыто.
+    func backgroundRefresh() async {
+        guard !isDemo, isLoggedIn else { return }
+        scheduleBackgroundRefresh()
+        if !vpn.hasProfile { await vpn.load() }
+        DiagLog.write("фоновое обновление подписки", to: .app)
+        await refresh(includeAccount: hasSession)
+    }
+
+    // MARK: - Избранное
+
+    func isFavorite(_ route: Route) -> Bool { favorites.contains(route.id) }
+
+    func toggleFavorite(_ route: Route) {
+        if favorites.contains(route.id) { favorites.remove(route.id) } else { favorites.insert(route.id) }
+        defaults.set(Array(favorites).sorted(), forKey: SettingsKey.favorites)
     }
 
     /// Загружает одну подписку. Возвращает текст ошибки или nil.
@@ -504,6 +595,10 @@ final class AppModel {
             case "servers":
                 selectedTab = .home
                 showServers = true
+                return
+            case "subscription":
+                selectedTab = .settings
+                settingsPath = [.subscription]
                 return
             default:
                 break
@@ -977,7 +1072,7 @@ final class AppModel {
         return ConnectRequest(config: json,
                               routeID: route.id,
                               routeTitle: "\(route.emoji) \(route.title)",
-                              onDemand: defaults.bool(forKey: SettingsKey.autoConnect),
+                              onDemand: AppSettings.autoConnect,
                               killSwitch: defaults.bool(forKey: SettingsKey.killSwitch))
     }
 
@@ -1003,7 +1098,7 @@ final class AppModel {
             ranked.prefix(6).forEach(add)
         }
         if let id = connectedRouteID, let route = routes.first(where: { $0.id == id }) { add(route) }
-        return AutoPool(auto: autoMode, candidates: list)
+        return AutoPool(auto: autoMode, candidates: list, updatedAt: Date())
     }
 
     private func syncPool() async {
@@ -1067,6 +1162,8 @@ final class AppModel {
 
     /// Выключить VPN или отменить подключение, которое ещё идёт.
     func disconnect() async {
+        let background = BackgroundWork.begin("Выключение VPN")
+        defer { background.end() }
         connectToken += 1
         phase = nil
         isSwitching = false
@@ -1080,6 +1177,8 @@ final class AppModel {
     }
 
     func connect() async {
+        let background = BackgroundWork.begin("Подключение VPN")
+        defer { background.end() }
         connectToken += 1
         let token = connectToken
         if isDemo {
@@ -1131,6 +1230,13 @@ final class AppModel {
         req.pool = TunnelCoding.encode(makePool()).map { String(decoding: $0, as: UTF8.self) }
         do {
             try await vpn.connect(req)
+            // После первого удачного подключения — один раз спросить про уведомления (напоминания о продлении).
+            Task {
+                try? await Task.sleep(for: .seconds(2))
+                await Reminders.askOnce()
+                sharedSubscriptionKey = nil
+                shareSubscription()
+            }
         } catch {
             guard token == connectToken else { return }
             vpn.lastError = error.localizedDescription
@@ -1152,7 +1258,11 @@ final class AppModel {
             return
         }
         isSwitching = true
-        defer { isSwitching = false }
+        let background = BackgroundWork.begin("Смена сервера")
+        defer {
+            isSwitching = false
+            background.end()
+        }
         if isDemo {
             try? await Task.sleep(for: .seconds(1.3))
             connectedRouteID = route.id
@@ -1211,7 +1321,7 @@ final class AppModel {
 
     func autoConnectChanged(_ enabled: Bool) {
         AppGroup.defaults?.set(enabled, forKey: SharedKey.autoConnect)
-        DiagLog.write("«Подключаться само»: \(enabled ? "вкл" : "выкл")", to: .app)
+        DiagLog.write("«Держать VPN включённым»: \(enabled ? "вкл" : "выкл")", to: .app)
         Task { await vpn.setOnDemand(enabled) }
     }
 

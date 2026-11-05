@@ -12,5 +12,9 @@ struct SecretClubApp: App {
                 .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
                 .onOpenURL { model.handle(url: $0) }
         }
+        // Подписка обновляется и без открытия приложения: свежие серверы доезжают до VPN и виджета.
+        .backgroundTask(.appRefresh(AppModel.refreshTaskID)) { [model] in
+            await model.backgroundRefresh()
+        }
     }
 }

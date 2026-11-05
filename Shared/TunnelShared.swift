@@ -41,6 +41,8 @@ struct AutoPool: Codable {
     /// false — выбран сервер вручную: только проверяем, не переключаем.
     var auto: Bool
     var candidates: [AutoCandidate]
+    /// Когда приложение собрало список: расширение берёт самый свежий (из запуска, своего файла или профиля VPN).
+    var updatedAt: Date? = nil
 
     func group(of id: String?) -> String? { candidates.first { $0.id == id }?.group }
 

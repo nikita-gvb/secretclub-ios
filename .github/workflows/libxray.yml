@@ -1,0 +1,47 @@
+name: LibXray
+
+# Отдельная сборка LibXray в кэш (её же подхватывает Build). Запускается вручную.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: libxray
+  cancel-in-progress: false
+
+jobs:
+  libxray:
+    runs-on: macos-15-intel
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Xcode
+        run: |
+          X=$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)
+          sudo xcode-select -s "$X/Contents/Developer"
+          xcodebuild -version
+      - name: Restore LibXray
+        id: libxray-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: Vendor/LibXray.xcframework
+          key: libxray-sc-${{ hashFiles('scripts/libxray/**', 'scripts/build-libxray.sh') }}
+      - uses: actions/setup-go@v5
+        if: steps.libxray-cache.outputs.cache-hit != 'true'
+        with:
+          go-version: stable
+          cache: false
+      - name: Build LibXray
+        if: steps.libxray-cache.outputs.cache-hit != 'true'
+        env:
+          GOTOOLCHAIN: auto
+        run: ./scripts/build-libxray.sh Vendor
+      - name: Save LibXray
+        if: steps.libxray-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: Vendor/LibXray.xcframework
+          key: ${{ steps.libxray-cache.outputs.cache-primary-key }}
+      - name: Check
+        run: |
+          cat Vendor/LibXray.xcframework/SECRETCLUB
+          for a in $(find Vendor/LibXray.xcframework -name libXray.a); do lipo -info "$a"; done

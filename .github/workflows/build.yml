@@ -25,16 +25,42 @@ jobs:
           brew install xcodegen
           xcodegen --version
 
-      - name: Cache LibXray
+      # LibXray собираем сами (scripts/build-libxray.sh): в официальной сборке ядро будит
+      # процессор каждую секунду (FreeOSMemory) — это лишний расход батареи.
+      - name: Restore LibXray
         id: libxray-cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: Vendor/LibXray.xcframework
-          key: libxray-apple-cgo-v26.10.31
+          key: libxray-sc-${{ hashFiles('scripts/libxray/**', 'scripts/build-libxray.sh') }}
 
-      - name: Download LibXray
+      - name: Go
         if: steps.libxray-cache.outputs.cache-hit != 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+
+      - name: Build LibXray
+        id: libxray-build
+        if: steps.libxray-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        env:
+          GOTOOLCHAIN: auto
+        run: ./scripts/build-libxray.sh Vendor
+
+      - name: Save LibXray
+        if: steps.libxray-cache.outputs.cache-hit != 'true' && steps.libxray-build.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: Vendor/LibXray.xcframework
+          key: ${{ steps.libxray-cache.outputs.cache-primary-key }}
+
+      - name: Download LibXray (fallback)
+        if: steps.libxray-cache.outputs.cache-hit != 'true' && steps.libxray-build.outcome != 'success'
         run: |
+          echo "::warning::Собственная сборка LibXray не удалась — берём официальную"
+          rm -rf Vendor/LibXray.xcframework
           mkdir -p Vendor /tmp/libxray
           curl -fsSL -o /tmp/libxray.zip https://github.com/XTLS/libXray/releases/download/v26.10.31/libxray-apple-cgo.zip
           unzip -q /tmp/libxray.zip -d /tmp/libxray

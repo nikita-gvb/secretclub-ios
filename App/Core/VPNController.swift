@@ -42,6 +42,11 @@ final class VPNController {
     @ObservationIgnored private var statsTask: Task<Void, Never>?
     @ObservationIgnored private var foreground = true
     @ObservationIgnored private(set) var isDemo = false
+    /// Когда расширение последний раз ответило на запрос статуса и сколько запросов подряд сорвалось.
+    @ObservationIgnored private(set) var lastReportAt: Date?
+    @ObservationIgnored private(set) var pollFailures = 0
+    @ObservationIgnored private var listening = false
+    @ObservationIgnored private var refreshing = false
     /// Каждый свежий отчёт расширения (сервер мог смениться сам).
     @ObservationIgnored var onReport: (@MainActor (TunnelReport) -> Void)?
 
@@ -113,6 +118,7 @@ final class VPNController {
 
     func load() async {
         guard !isDemo else { return }
+        listenForTunnel()
         do {
             let managers = try await NETunnelProviderManager.loadAllFromPreferences()
             let mine = managers.first {
@@ -319,6 +325,36 @@ final class VPNController {
         _ = await send(TunnelCommand(kind: .check, reason: network ? "network" : "app"), attempts: 1, timeout: 3)
     }
 
+    /// Расширение сообщает об изменениях (сменился сервер, итог проверки) — не ждём очередного опроса.
+    private func listenForTunnel() {
+        guard !listening else { return }
+        listening = true
+        let observer = Unmanaged.passUnretained(self).toOpaque()
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), observer, { _, observer, _, _, _ in
+            guard let observer else { return }
+            let controller = Unmanaged<VPNController>.fromOpaque(observer).takeUnretainedValue()
+            Task { @MainActor in await controller.refreshReport() }
+        }, TunnelSignal.changed as CFString, nil, .deliverImmediately)
+    }
+
+    /// Свежий отчёт расширения прямо сейчас.
+    func refreshReport() async {
+        guard !isDemo, foreground, !refreshing, state == .connected || state == .connecting else { return }
+        refreshing = true
+        defer { refreshing = false }
+        if let r = await send(TunnelCommand(kind: .status), attempts: 2, timeout: 4) { receive(r) }
+    }
+
+    private func receive(_ r: TunnelReport) {
+        if report != r { report = r }
+        sample(r)
+        bytesIn = r.downlink
+        bytesOut = r.uplink
+        lastReportAt = Date()
+        pollFailures = 0
+        onReport?(r)
+    }
+
     func setForeground(_ value: Bool) {
         foreground = value
         if value, state == .connected { startStats() } else if !value { stopStats() }
@@ -329,12 +365,11 @@ final class VPNController {
         statsTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
-                if let r = await self.send(TunnelCommand(kind: .status), attempts: 1, timeout: 2) {
-                    if self.report != r { self.report = r }
-                    self.sample(r)
-                    self.bytesIn = r.downlink
-                    self.bytesOut = r.uplink
-                    self.onReport?(r)
+                // Ядро может перезапускаться (смена сервера) — ждём ответа подольше, чем секунда опроса.
+                if let r = await self.send(TunnelCommand(kind: .status), attempts: 1, timeout: 4) {
+                    self.receive(r)
+                } else {
+                    self.pollFailures += 1
                 }
                 try? await Task.sleep(for: .seconds(1))
             }

@@ -19,6 +19,17 @@ enum CoreConfig {
         return String(decoding: data, as: UTF8.self)
     }
 
+    /// Имена счётчиков ядра для этого конфига: отправлено/получено через TUN и получено от сервера.
+    static func counterNames(_ text: String) -> (up: String, down: String, server: String)? {
+        guard let root = object(text) else { return nil }
+        let inbounds = root["inbounds"] as? [[String: Any]] ?? []
+        guard let tun = inbounds.first(where: { ($0["protocol"] as? String) == "tun" })?["tag"] as? String,
+              !tun.isEmpty else { return nil }
+        let main = mainOutbound(root["outbounds"] as? [[String: Any]] ?? [])?["tag"] as? String ?? "proxy"
+        return ("inbound>>>\(tun)>>>traffic>>>uplink", "inbound>>>\(tun)>>>traffic>>>downlink",
+                "outbound>>>\(main)>>>traffic>>>downlink")
+    }
+
     /// Основной outbound сервера: с тегом proxy или первый не служебный.
     static func mainOutbound(_ outbounds: [[String: Any]]) -> [String: Any]? {
         if let proxy = outbounds.first(where: { ($0["tag"] as? String) == "proxy" }) { return proxy }
@@ -70,7 +81,14 @@ enum CoreConfig {
         } else {
             inbounds.append(health)
         }
-        for key in ["stats", "metrics", "api"] { root.removeValue(forKey: key) }
+        for key in ["metrics", "api"] { root.removeValue(forKey: key) }
+        // Счётчики трафика: вход TUN (всё, что прошло через VPN) и outbounds (ответы сервера).
+        root["stats"] = [String: Any]()
+        var policy = root["policy"] as? [String: Any] ?? [:]
+        var system = policy["system"] as? [String: Any] ?? [:]
+        for key in ["statsInboundUplink", "statsInboundDownlink", "statsOutboundDownlink"] { system[key] = true }
+        policy["system"] = system
+        root["policy"] = policy
         // Наблюдатель (пинг серверов по таймеру) нужен только балансировщику — без него не будим сеть.
         let routingObject = root["routing"] as? [String: Any]
         if (routingObject?["balancers"] as? [Any] ?? []).isEmpty {

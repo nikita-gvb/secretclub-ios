@@ -28,6 +28,14 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     var launchedAt: Date?
     var utunName: String?
     var ifaceLast: (out: UInt32, inb: UInt32)?
+    /// Счётчики ядра для рабочего конфига; nil — считаем по utun (запасной путь).
+    var counterNames: (up: String, down: String, server: String)?
+    /// Ядро сбрасывает счётчики при перезапуске — копим итог прошлых запусков.
+    var trafficBase: (up: Int64, down: Int64, server: Int64) = (0, 0, 0)
+    /// Получено от рабочего сервера за сеанс (для сторожа).
+    var serverDown: Int64 = 0
+    /// Последнее обновление счётчиков шло из ядра.
+    var coreCounters = false
     /// Запасные серверы «Авто».
     var pool: AutoPool?
 
@@ -45,7 +53,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     var idleTicks = 0
     var stallStrikes = 0
     var stallSpacing: Double = 20
-    var lastTraffic: (up: Int64, down: Int64) = (0, 0)
+    var lastTraffic: (up: Int64, down: Int64, server: Int64) = (0, 0, 0)
+    /// Когда сервер последний раз прошёл проверку объёмом (id → время).
+    var payloadOK: [String: Date] = [:]
     var pendingCheck: DispatchWorkItem?
     var pendingReason: CheckReason?
     var evaluating = false
@@ -242,9 +252,12 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     func launch(_ target: Active) throws {
         if stopped { throw Self.error("туннель остановлен") }
         if report.running {
+            updateCounters()
             XrayEngine.stopSync()
             report.running = false
         }
+        // Новое ядро начнёт счёт с нуля — продолжаем от уже накопленного.
+        trafficBase = (report.uplink, report.downlink, serverDown)
         if report.coreVersion.isEmpty { report.coreVersion = XrayEngine.version }
         guard let fd = Self.tunnelFileDescriptor(&utunName) else {
             throw Self.error("не найден дескриптор utun")
@@ -272,6 +285,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             extraPorts = [:]
         }
         active = target
+        counterNames = CoreConfig.counterNames(target.config)
         launchedAt = Date()
         report.routeID = target.id
         report.routeTitle = target.title
@@ -280,6 +294,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         report.error = nil
         report.multi = !extraPorts.isEmpty
         log.info("xray started, fd \(fd), health \(self.healthPort), extras \(self.extraPorts.count)")
+        TunnelSignal.post()
     }
 
     /// Какие запасные серверы держать в ядре: по нескольку лучших из каждой группы.
@@ -299,8 +314,25 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     // MARK: - Трафик
 
-    /// Счётчики самого интерфейса utun: что ушло в туннель (отправлено) и что пришло из него.
+    /// Трафик за сеанс. Основной путь — счётчики ядра (вход TUN); запасной — счётчики интерфейса utun
+    /// (на iOS они обычно не обновляются, поэтому статистика раньше стояла на нуле).
     func updateCounters() {
+        // Счётчики в ядре появляются с первым соединением; пока одного нет — считаем его нулём.
+        let names = report.running ? counterNames : nil
+        let up = names.flatMap { XrayEngine.counter($0.up) }
+        let down = names.flatMap { XrayEngine.counter($0.down) }
+        if let names, up != nil || down != nil {
+            report.uplink = trafficBase.up + (up ?? 0)
+            report.downlink = trafficBase.down + (down ?? 0)
+            serverDown = trafficBase.server + (XrayEngine.counter(names.server) ?? 0)
+            coreCounters = true
+            report.counters = "core"
+            return
+        }
+        // Ядро только что перезапущено и счётчики ещё не созданы — итог прежний, utun не подмешиваем.
+        if names != nil && coreCounters { return }
+        coreCounters = false
+        report.counters = "utun"
         guard let name = utunName, let current = Self.interfaceBytes(name) else { return }
         if let last = ifaceLast {
             report.uplink += Int64(current.out &- last.out)
@@ -341,6 +373,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     func post(_ text: String) {
         report.note = text
         report.noteID += 1
+        TunnelSignal.post()
     }
 
     // MARK: - Сеть

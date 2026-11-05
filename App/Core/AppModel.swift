@@ -725,9 +725,17 @@ final class AppModel {
         }
     }
 
+    /// Сервер из отчёта расширения. Если подписка успела обновиться и id сменился — ищем по названию.
+    private func resolveRoute(_ report: TunnelReport) -> String? {
+        guard let id = report.routeID else { return nil }
+        if configs[id] != nil || routes.contains(where: { $0.id == id }) { return id }
+        guard let title = report.routeTitle else { return nil }
+        return routes.first { "\($0.emoji) \($0.title)" == title || $0.remarks == title || $0.title == title }?.id
+    }
+
     /// Отчёт расширения: сервер мог смениться сам, плюс свежая проверка сети и сервера.
     private func apply(_ report: TunnelReport) {
-        if let id = report.routeID, id != connectedRouteID, configs[id] != nil {
+        if let id = resolveRoute(report), id != connectedRouteID {
             connectedRouteID = id
             defaults.set(id, forKey: SettingsKey.connectedRoute)
             if autoMode { autoRouteID = id }
@@ -1286,10 +1294,15 @@ final class AppModel {
             if let e = r.error { lines.append("Ошибка ядра: \(e)") }
             if let h = r.healthy { lines.append("Сервер отвечает: \(h ? "да" : "нет")\(r.pingMS.map { ", \($0) мс" } ?? "")") }
             if let ms = r.lastSwitchMS { lines.append("Последнее переключение: \(String(format: "%.1f", Double(ms) / 1000)) с") }
+            if let source = r.counters { lines.append("Счётчики трафика: \(source == "core" ? "ядро" : "интерфейс utun")") }
             if let events = r.events, !events.isEmpty {
                 lines.append("Журнал расширения:")
                 lines += events.suffix(16).map { "  \($0)" }
             }
+        }
+        if vpn.state == .connected {
+            let link = vpn.lastReportAt.map { "ответ \(Int(Date().timeIntervalSince($0))) с назад" } ?? "ответов не было"
+            lines.append("Связь с расширением: \(link)\(vpn.pollFailures > 0 ? ", сбоев подряд: \(vpn.pollFailures)" : "")")
         }
         if let route = activeRoute { lines.append("Маршрут: \(route.remarks) [\(route.group.rawValue), \(route.transportTitle)]") }
         lines.append("Режим: \(autoMode ? "Авто" : "вручную"), способ: \(TransportPreference(rawValue: defaults.string(forKey: SettingsKey.transport) ?? "")?.title ?? "Авто")")

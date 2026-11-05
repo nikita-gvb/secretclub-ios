@@ -252,7 +252,8 @@ extension PacketTunnelProvider {
         updateCounters()
         let up = report.uplink - lastTraffic.up
         let down = report.downlink - lastTraffic.down
-        lastTraffic = (report.uplink, report.downlink)
+        let fromServer = serverDown - lastTraffic.server
+        lastTraffic = (report.uplink, report.downlink, serverDown)
         let busy = up + down > 4096
         idleTicks = busy ? 0 : idleTicks + 1
         let next: Double = (busy || idleTicks < 3) ? 10 : 30
@@ -261,11 +262,20 @@ extension PacketTunnelProvider {
             watchdog?.schedule(deadline: .now() + next, repeating: next, leeway: .milliseconds(Int(next * 250)))
         }
         guard report.running, !evaluating, pendingCheck == nil, startCompletion == nil else { return }
-        // Ответы ядро генерирует и само (TCP внутри туннеля), поэтому «ничего» — это меньше трети.
-        let stalled = up > 4000 && down < up / 3 && down < 65536
+        let stalled: Bool
+        if coreCounters {
+            // Ядро считает полезные данные. Пока соединение с сервером не установлено, запросы приложений
+            // ещё не прочитаны — видны в основном DNS-запросы. Пользователь активен, а в ответ почти ничего
+            // (и от сервера, и вообще) — похоже, сервер умер. Проверка лёгкая, ложная тревога стоит ~2 КБ.
+            stalled = up + down > 600 && fromServer < 1024 && down < 8192
+        } else {
+            // Счётчики utun: ответы ядро генерирует и само (TCP внутри туннеля), поэтому «ничего» — меньше трети.
+            stalled = up > 4000 && down < up / 3 && down < 65536
+        }
         guard stalled else {
             stallStrikes = 0
-            if busy { stallSpacing = 20 }
+            // Интервал между проверками сбрасываем, только когда сервер точно снова отдаёт данные.
+            if (coreCounters ? fromServer > 16384 : busy) { stallSpacing = 20 }
             return
         }
         stallStrikes += 1
@@ -352,7 +362,8 @@ extension PacketTunnelProvider {
                 }
             }
         }
-        let broad: Set<CheckReason> = [.start, .network, .retry, .stall]
+        // Подозрение на обрыв сначала проверяем лёгким запросом через рабочий сервер; не ответил — всех.
+        let broad: Set<CheckReason> = [.start, .network, .retry]
         return CheckContext(reason: reason, auto: auto, activeProbe: probe, activeGroup: activeGroup, extras: extras,
                             broad: auto && broad.contains(reason),
                             compare: reason == .start || reason == .network,
@@ -384,10 +395,20 @@ extension PacketTunnelProvider {
         }
 
         // Подозрение на обрыв, а маленькая проверка проходит — проверяем объёмом (блокировка после ~16 КБ).
+        // Не чаще раза в 15 минут на сервер: тревога могла быть ложной (например, долгая выгрузка файла).
         if ctx.reason == .stall, survey.activeMS != nil, !ctx.activeThrottled {
-            if case .stalled(let bytes) = await LatencyProbe.payload(port: ctx.activeProbe.port) {
-                await onWork { self.markFrozen(self.active?.id, bytes: bytes) }
-                survey.activeMS = nil
+            let id = ctx.activeProbe.id
+            let recent = await onWork { self.payloadOK[id].map { Date().timeIntervalSince($0) < 900 } ?? false }
+            if !recent {
+                switch await LatencyProbe.payload(port: ctx.activeProbe.port) {
+                case .stalled(let bytes):
+                    await onWork { self.markFrozen(self.active?.id, bytes: bytes) }
+                    survey.activeMS = nil
+                case .ok:
+                    await onWork { self.payloadOK[id] = Date() }
+                case .inconclusive:
+                    break
+                }
             }
         }
 
@@ -671,6 +692,7 @@ extension PacketTunnelProvider {
             guard self.launchedAt == start.launched, !self.evaluating else { return }
             switch verdict {
             case .ok(let speed):
+                if let id = self.active?.id { self.payloadOK[id] = Date() }
                 self.memory.update(self.memoryKey) { $0.payloadAt = Date(); $0.freezeUntil = nil }
                 self.event("проверка объёмом: ок, \(speed) КБ/с")
             case .stalled(let bytes):
@@ -725,7 +747,7 @@ extension PacketTunnelProvider {
                 memory.lastActive = id
                 memory.update(memoryKey) { $0.best = id }
             }
-            if ctx.reason == .stall && switched == nil { stallSpacing = min(stallSpacing * 2, 160) }
+            if ctx.reason == .stall && switched == nil { stallSpacing = min(stallSpacing * 2, 320) }
         } else {
             if !failureNoted && ctx.reason != .start && ctx.auto {
                 post("В этой сети серверы не отвечают — пробуем снова")
@@ -737,6 +759,7 @@ extension PacketTunnelProvider {
         evaluating = false
         report.checking = false
         finishStart()
+        TunnelSignal.post()
     }
 
     static func groupTitle(_ group: String) -> String {

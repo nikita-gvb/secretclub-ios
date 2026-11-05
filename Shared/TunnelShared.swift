@@ -13,6 +13,17 @@ enum TunnelOption {
     static let pool = "pool"
 }
 
+/// Сигнал расширения приложению (Darwin-уведомление): отчёт изменился — сменился сервер,
+/// появилось сообщение или итог проверки. Приложение сразу запрашивает свежий статус.
+enum TunnelSignal {
+    static let changed = "com.secretclub.tunnel.changed"
+
+    static func post() {
+        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                             CFNotificationName(changed as CFString), nil, nil, true)
+    }
+}
+
 /// Сервер-кандидат для «Авто»: готовый конфиг, чтобы расширение могло само
 /// переключиться, если текущий сервер перестал работать (например, сменилась сеть).
 struct AutoCandidate: Codable, Hashable {
@@ -94,6 +105,8 @@ struct TunnelReport: Codable, Equatable {
     var lastSwitchMS: Int? = nil
     /// Ядро держит проверочные входы для всех запасных серверов (быстрая проверка без перезапуска).
     var multi: Bool? = nil
+    /// Откуда счётчики трафика: core — из ядра, utun — по интерфейсу (запасной путь).
+    var counters: String? = nil
 }
 
 enum TunnelCoding {

@@ -61,6 +61,17 @@ enum XrayEngine {
         return (data?["ports"] as? [NSNumber])?.map(\.intValue) ?? []
     }
 
+    /// Счётчик статистики запущенного ядра (наша сборка libXray, SecretClubCounter).
+    /// nil — ядро не запущено или такого счётчика нет.
+    static func counter(_ name: String) -> Int64? {
+        let value: Int64 = name.withCString { ptr -> Int64 in
+            guard let input = strdup(ptr) else { return -1 }
+            defer { free(input) }
+            return Int64(SecretClubCounter(input))
+        }
+        return value >= 0 ? value : nil
+    }
+
     static func runSync(_ config: String) throws {
         _ = try invokeSync("runXray", payload: ["xrayJson": config])
     }

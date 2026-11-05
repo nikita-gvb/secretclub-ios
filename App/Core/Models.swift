@@ -160,6 +160,12 @@ enum Quality {
     }
 }
 
+/// Статус узла от бэкенда (/api/app/nodes).
+struct NodeStatus: Hashable {
+    let online: Bool
+    let load: Double?
+}
+
 struct ProbeResult: Identifiable, Hashable {
     let id: String
     let title: String

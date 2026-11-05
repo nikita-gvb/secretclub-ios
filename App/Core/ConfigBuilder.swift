@@ -18,9 +18,10 @@ enum ConfigBuilder {
     static let availableGeo: Set<String> = ["geoip:ru", "geoip:private", "geosite:ru-inside"]
     static let localDomains: Set<String> = ["domain:local", "domain:lan", "domain:home.arpa", "localhost"]
 
+    /// Ключи по алфавиту: один и тот же конфиг всегда даёт один и тот же текст (кэш проверки ядром).
     static func json(_ obj: Any) -> String? {
         guard JSONSerialization.isValidJSONObject(obj),
-              let data = try? JSONSerialization.data(withJSONObject: obj) else { return nil }
+              let data = try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys]) else { return nil }
         return String(data: data, encoding: .utf8)
     }
 
@@ -33,6 +34,11 @@ enum ConfigBuilder {
     static func runtime(_ raw: [String: Any], options: BuildOptions) -> [String: Any] {
         var c = raw
         for key in ["remarks", "remnawave", "metrics", "stats", "api", "reverse"] { c.removeValue(forKey: key) }
+        // Наблюдатель пингует серверы по таймеру — нужен только балансировщику; без него меньше пробуждений.
+        if ((c["routing"] as? [String: Any])?["balancers"] as? [Any] ?? []).isEmpty {
+            c.removeValue(forKey: "observatory")
+            c.removeValue(forKey: "burstObservatory")
+        }
         c["log"] = ["loglevel": options.quietLog ? "error" : "warning", "access": "none"]
         c["inbounds"] = [tunInbound, ["tag": healthTag, "listen": "127.0.0.1", "port": 0, "protocol": "http",
                                       "settings": [String: Any]()]]
@@ -102,30 +108,10 @@ enum ConfigBuilder {
         var outbounds: [[String: Any]] = [["tag": "ping-block", "protocol": "blackhole"]]
         var rules: [[String: Any]] = []
         var map: [String: Int] = [:]
-        let skipped: Set<String> = ["dns", "loopback"]
         for (index, item) in items.enumerated() where index < ports.count {
-            guard let list = item.raw["outbounds"] as? [[String: Any]],
-                  let main = RouteClassifier.mainOutbound(list) else { continue }
-            let prefix = "p\(index)-"
-            let mainTag = prefix + (main["tag"] as? String ?? "proxy")
-            for outbound in list {
-                let proto = (outbound["protocol"] as? String ?? "").lowercased()
-                if skipped.contains(proto) { continue }
-                var o = outbound
-                o["tag"] = prefix + (outbound["tag"] as? String ?? "proxy")
-                if var stream = o["streamSettings"] as? [String: Any],
-                   var sock = stream["sockopt"] as? [String: Any],
-                   let dialer = sock["dialerProxy"] as? String, !dialer.isEmpty {
-                    sock["dialerProxy"] = prefix + dialer
-                    stream["sockopt"] = sock
-                    o["streamSettings"] = stream
-                }
-                if var proxy = o["proxySettings"] as? [String: Any], let tag = proxy["tag"] as? String {
-                    proxy["tag"] = prefix + tag
-                    o["proxySettings"] = proxy
-                }
-                outbounds.append(o)
-            }
+            guard let part = CoreConfig.prefixed(item.raw, prefix: "p\(index)-") else { continue }
+            let mainTag = part.main
+            outbounds += part.outbounds
             let inTag = "in\(index)"
             inbounds.append(["tag": inTag, "listen": "127.0.0.1", "port": ports[index], "protocol": "http",
                              "settings": [String: Any]()])

@@ -22,6 +22,8 @@ struct AutoCandidate: Codable, Hashable {
     var group: String
     var config: String
     var target: PingTarget?
+    /// Нагрузка узла 0…1 по данным бэкенда (nil — неизвестно).
+    var load: Double? = nil
 }
 
 struct AutoPool: Codable {
@@ -35,6 +37,10 @@ struct AutoPool: Codable {
     static func order(for network: NetKind) -> [String] {
         network == .whitelist ? ["bridge", "reserve"] : ["regular", "bridge", "reserve"]
     }
+
+    /// Все группы по приоритету: обычные → мосты → резерв.
+    static let priority = ["regular", "bridge", "reserve"]
+    static func rank(_ group: String) -> Int { priority.firstIndex(of: group) ?? priority.count }
 }
 
 /// Сервер для замера задержки из расширения (мимо туннеля).
@@ -82,6 +88,12 @@ struct TunnelReport: Codable, Equatable {
     /// Сообщение для пользователя (например, «переключились на …»); noteID растёт с каждым новым.
     var note: String? = nil
     var noteID = 0
+    /// Журнал последних решений расширения (для отчёта поддержке): «12:01:03 сеть wifi→cellular …».
+    var events: [String]? = nil
+    /// Сколько заняло последнее переключение/выбор сервера, мс.
+    var lastSwitchMS: Int? = nil
+    /// Ядро держит проверочные входы для всех запасных серверов (быстрая проверка без перезапуска).
+    var multi: Bool? = nil
 }
 
 enum TunnelCoding {

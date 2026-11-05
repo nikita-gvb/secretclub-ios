@@ -156,9 +156,7 @@ enum SubscriptionService {
 /// Раскладывает серверы из подписки по группам по названию и транспорту.
 enum RouteClassifier {
     static func mainOutbound(_ outbounds: [[String: Any]]) -> [String: Any]? {
-        if let proxy = outbounds.first(where: { ($0["tag"] as? String) == "proxy" }) { return proxy }
-        let service = ["freedom", "blackhole", "dns", "loopback"]
-        return outbounds.first { !service.contains(($0["protocol"] as? String ?? "").lowercased()) }
+        CoreConfig.mainOutbound(outbounds)
     }
 
     static func address(_ outbound: [String: Any]) -> String {

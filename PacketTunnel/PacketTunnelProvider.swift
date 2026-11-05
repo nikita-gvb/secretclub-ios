@@ -4,34 +4,71 @@ import NetworkExtension
 import os
 
 /// Туннель SecretClub: поднимает utun и запускает ядро Xray с TUN-входом прямо на его дескрипторе.
-/// Собственный трафик расширения (подключения к серверам) идёт мимо туннеля — так устроен iOS.
+/// Собственный трафик расширения (подключения к серверам, проверки) идёт мимо туннеля — так устроен iOS.
 final class PacketTunnelProvider: NEPacketTunnelProvider {
-    private let log = Logger(subsystem: "com.secretclub.app.tunnel", category: "provider")
-    /// Все обращения к ядру и к report — только на этой очереди.
-    private let work = DispatchQueue(label: "com.secretclub.tunnel.work", qos: .userInitiated)
-    private var report = TunnelReport()
-    /// Локальный HTTP-вход ядра для проверки, работает ли сервер.
-    private var healthPort = 0
-    private var currentConfig: String?
-    private var utunName: String?
-    private var ifaceLast: (out: UInt32, inb: UInt32)?
-    /// Запасные серверы «Авто» и наблюдение за сетью.
-    private var pool: AutoPool?
-    private var pathMonitor: NWPathMonitor?
-    private var pathSignature: String?
-    private var watchdog: DispatchSourceTimer?
-    private var pendingCheck: DispatchWorkItem?
-    private var pendingReason: CheckReason?
-    private var evaluating = false
-    private var lastCheck: Date?
-    private var lastNetworkCheck: Date?
-    private var failedAt: Date?
-    private var lastTraffic: (up: Int64, down: Int64) = (0, 0)
+    let log = Logger(subsystem: "com.secretclub.app.tunnel", category: "provider")
+    /// Все обращения к ядру и к состоянию ниже — только на этой очереди.
+    let work = DispatchQueue(label: "com.secretclub.tunnel.work", qos: .userInitiated)
+    var report = TunnelReport()
+
+    /// Рабочий сервер: его конфиг сейчас в ядре.
+    struct Active {
+        var id: String?
+        var title: String?
+        var config: String
+    }
+
+    /// Локальный HTTP-вход ядра для проверки рабочего сервера.
+    var healthPort = 0
+    var active: Active?
+    /// Проверочные входы запасных серверов в запущенном ядре: id → порт.
+    var extraPorts: [String: Int] = [:]
+    /// Ядро не приняло общий конфиг — до нового пула запускаем серверы по одному.
+    var multiBroken = false
+    var launchedAt: Date?
+    var utunName: String?
+    var ifaceLast: (out: UInt32, inb: UInt32)?
+    /// Запасные серверы «Авто».
+    var pool: AutoPool?
+
+    // Наблюдение за сетью
+    var pathMonitor: NWPathMonitor?
+    var pathSignature: String?
+    var pathFingerprint: String?
+    var memoryKey: String?
+    var networkFirstEvent: Date?
+    var lastNetworkChange: Date?
+
+    // Проверки
+    var watchdog: DispatchSourceTimer?
+    var watchInterval: Double = 10
+    var idleTicks = 0
+    var stallStrikes = 0
+    var stallSpacing: Double = 20
+    var lastTraffic: (up: Int64, down: Int64) = (0, 0)
+    var pendingCheck: DispatchWorkItem?
+    var pendingReason: CheckReason?
+    var evaluating = false
+    var lastCheck: Date?
+    var retryStep = 0
+    var failureNoted = false
+    var asleepSince: Date?
+    var startCompletion: ((Error?) -> Void)?
+    /// Туннель останавливается: больше ничего не запускаем.
+    var stopped = false
+
+    // Память и статистика
+    var memory = NetMemory.load()
+    var stats: [String: CandidateStat] = [:]
+    /// Серверы, у которых в этой сети «замирает» соединение после ~16 КБ.
+    var throttled: Set<String> = []
+    var events: [String] = []
 
     enum CheckReason: String {
-        /// start — после запуска/смены сервера, network — сменилась сеть, stall — трафик уходит,
-        /// а ответов нет, app — попросило приложение.
-        case start, network, stall, app
+        /// start — запуск туннеля, network — сменилась сеть, stall — трафик уходит, а ответов нет,
+        /// app — попросило приложение, retry — повтор после неудачи, wake — устройство проснулось,
+        /// reload — приложение сменило сервер.
+        case start, network, stall, app, retry, wake, reload
     }
 
     // MARK: - Жизненный цикл
@@ -58,34 +95,76 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 return
             }
             self.work.async {
+                self.loadPool(options?[TunnelOption.pool] as? String)
+                // Автоподключение без приложения: берём последний сервер, который сработал.
+                var target = Active(id: routeID, title: routeTitle, config: config)
+                if options?[TunnelOption.config] == nil, let last = self.memory.lastActive,
+                   let candidate = self.pool?.candidates.first(where: { $0.id == last }), self.pool?.auto == true {
+                    target = Active(id: candidate.id, title: candidate.title, config: candidate.config)
+                }
                 do {
-                    self.loadPool(options?[TunnelOption.pool] as? String)
-                    try self.startCore(config)
-                    self.report.routeID = routeID
-                    self.report.routeTitle = routeTitle
-                    self.report.uplink = 0
-                    self.report.downlink = 0
-                    self.ifaceLast = self.utunName.flatMap(Self.interfaceBytes)
-                    self.startMonitoring()
-                    self.scheduleCheck(.start, delay: 3)
-                    completionHandler(nil)
+                    try self.launch(target)
                 } catch {
                     self.log.error("start failed: \(error.localizedDescription, privacy: .public)")
                     self.report.error = error.localizedDescription
                     completionHandler(Self.error("Ядро Xray не запустилось: \(error.localizedDescription)"))
+                    return
                 }
+                self.report.uplink = 0
+                self.report.downlink = 0
+                self.ifaceLast = self.utunName.flatMap(Self.interfaceBytes)
+                self.startMonitoring()
+                // «Подключено» — только после проверки сервера (и выбора лучшего в «Авто»).
+                // Если проверка затянулась — всё равно отпускаем систему, проверка доведёт дело сама.
+                self.startCompletion = completionHandler
+                self.work.asyncAfter(deadline: .now() + 9) { self.finishStart() }
+                self.scheduleCheck(.start, delay: 0)
             }
         }
     }
 
+    /// На очереди work.
+    func finishStart() {
+        guard let completion = startCompletion else { return }
+        startCompletion = nil
+        completion(nil)
+    }
+
     override func stopTunnel(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
         work.async {
+            self.stopped = true
+            self.startCompletion = nil
             self.stopMonitoring()
             if self.report.running {
                 XrayEngine.stopSync()
                 self.report.running = false
             }
+            self.memory.save()
             completionHandler()
+        }
+    }
+
+    override func sleep(completionHandler: @escaping () -> Void) {
+        work.async {
+            self.asleepSince = Date()
+            self.stopWatchdog()
+            if self.pendingReason != .network {
+                self.pendingCheck?.cancel()
+                self.pendingCheck = nil
+                self.pendingReason = nil
+            }
+            completionHandler()
+        }
+    }
+
+    override func wake() {
+        work.async {
+            let slept = self.asleepSince.map { Date().timeIntervalSince($0) } ?? 0
+            self.asleepSince = nil
+            guard self.report.running else { return }
+            self.startWatchdog()
+            // Долго спали — соединения с сервером могли протухнуть (NAT); после неудачи — пробуем снова.
+            if slept > 90 || self.retryStep > 0 { self.scheduleCheck(.wake, delay: 1) }
         }
     }
 
@@ -109,17 +188,17 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             work.async {
                 if let pool = command.pool {
                     self.pool = pool
+                    self.multiBroken = false
                     Self.savePool(pool)
                 }
                 completionHandler?(TunnelCoding.encode(self.report))
             }
         case .check:
             work.async {
-                let reason: CheckReason = command.reason == "network" ? .network : .app
-                // Свежая проверка уже есть — не дёргаем сеть лишний раз.
-                let recent = self.lastCheck.map { Date().timeIntervalSince($0) < 20 } ?? false
-                if !(reason == .app && recent && self.report.healthy == true) {
-                    self.scheduleCheck(reason, delay: reason == .network ? 2 : 0)
+                // Смену сети расширение видит само, раньше приложения, — от приложения это просто «проверь».
+                let fresh = self.lastCheck.map { Date().timeIntervalSince($0) < 60 } ?? false
+                if !(fresh && self.report.healthy == true) && !self.evaluating && self.pendingCheck == nil {
+                    self.scheduleCheck(.app, delay: 0)
                 }
                 completionHandler?(TunnelCoding.encode(self.report))
             }
@@ -141,21 +220,16 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             }
             work.async {
                 self.reasserting = true
-                if self.report.running {
-                    XrayEngine.stopSync()
-                    self.report.running = false
-                }
                 do {
-                    try self.startCore(config)
-                    self.report.routeID = command.routeID
-                    self.report.routeTitle = command.routeTitle
+                    try self.launch(Active(id: command.routeID, title: command.routeTitle, config: config))
                     self.report.healthy = nil
                     self.report.pingMS = nil
+                    self.event("приложение сменило сервер → «\(command.routeTitle ?? "?")»")
                 } catch {
                     self.report.error = error.localizedDescription
                 }
                 self.reasserting = false
-                if self.report.running { self.scheduleCheck(.start, delay: 2) }
+                if self.report.running { self.scheduleCheck(.reload, delay: 1.5) }
                 completionHandler?(TunnelCoding.encode(self.report))
             }
         }
@@ -163,68 +237,70 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     // MARK: - Ядро
 
-    /// Вызывать на очереди work, после setTunnelNetworkSettings.
-    private func startCore(_ config: String) throws {
+    /// Запускает ядро с этим сервером в роли рабочего и проверочными входами для запасных.
+    /// Если ядро не приняло общий конфиг — запускает один сервер, как раньше. На очереди work.
+    func launch(_ target: Active) throws {
+        if stopped { throw Self.error("туннель остановлен") }
+        if report.running {
+            XrayEngine.stopSync()
+            report.running = false
+        }
         if report.coreVersion.isEmpty { report.coreVersion = XrayEngine.version }
         guard let fd = Self.tunnelFileDescriptor(&utunName) else {
             throw Self.error("не найден дескриптор utun")
         }
         if healthPort == 0 { healthPort = XrayEngine.freePort() ?? 49228 }
-        let prepared = try Self.prepare(config, fd: fd, healthPort: healthPort)
-        try XrayEngine.runSync(prepared)
-        currentConfig = config
+        let extras = multiBroken ? [] : extrasFor(target.id)
+        var ports: [Int] = []
+        if !extras.isEmpty {
+            ports = XrayEngine.freePorts(extras.count + 1).filter { $0 != healthPort }
+        }
+        let assets = Bundle.main.resourcePath
+        do {
+            let built = try CoreConfig.compose(active: target.config, fd: fd, assetDir: assets, healthPort: healthPort,
+                                               extras: extras, ports: ports)
+            try XrayEngine.runSync(built.text)
+            extraPorts = built.ports
+        } catch let error where !extras.isEmpty {
+            // Какой-то запасной сервер ядру не понравился — работаем по-старому, по одному серверу.
+            event("ядро не приняло общий конфиг (\(error.localizedDescription)) — проверяем по одному")
+            multiBroken = true
+            XrayEngine.stopSync()
+            let built = try CoreConfig.compose(active: target.config, fd: fd, assetDir: assets, healthPort: healthPort,
+                                               extras: [], ports: [])
+            try XrayEngine.runSync(built.text)
+            extraPorts = [:]
+        }
+        active = target
+        launchedAt = Date()
+        report.routeID = target.id
+        report.routeTitle = target.title
         report.running = true
         report.startedAt = Date()
         report.error = nil
-        log.info("xray started, fd \(fd), health \(self.healthPort)")
+        report.multi = !extraPorts.isEmpty
+        log.info("xray started, fd \(fd), health \(self.healthPort), extras \(self.extraPorts.count)")
     }
 
-    /// Подставляет в конфиг дескриптор туннеля, путь к geo-файлам и порт проверочного входа.
-    static func prepare(_ text: String, fd: Int32, healthPort: Int) throws -> String {
-        guard var root = (try? JSONSerialization.jsonObject(with: Data(text.utf8))) as? [String: Any] else {
-            throw error("некорректная конфигурация")
+    /// Какие запасные серверы держать в ядре: по нескольку лучших из каждой группы.
+    func extrasFor(_ activeID: String?) -> [(id: String, config: String)] {
+        guard let pool, pool.auto else { return [] }
+        let limits = ["regular": 5, "bridge": 4, "reserve": 3]
+        var counts: [String: Int] = [:]
+        var out: [(id: String, config: String)] = []
+        for candidate in pool.candidates where candidate.id != activeID {
+            let n = counts[candidate.group, default: 0]
+            guard n < limits[candidate.group, default: 2] else { continue }
+            counts[candidate.group] = n + 1
+            out.append((candidate.id, candidate.config))
         }
-        var env = root["env"] as? [String: Any] ?? [:]
-        env["xray.tun.fd"] = String(fd)
-        if let resources = Bundle.main.resourcePath { env["xray.location.asset"] = resources }
-        root["env"] = env
-
-        var inbounds = root["inbounds"] as? [[String: Any]] ?? []
-        let health: [String: Any] = ["tag": "health-in", "listen": "127.0.0.1", "port": healthPort,
-                                     "protocol": "http", "settings": [String: Any]()]
-        if let index = inbounds.firstIndex(where: { ($0["tag"] as? String) == "health-in" }) {
-            inbounds[index] = health
-        } else {
-            inbounds.append(health)
-        }
-        root["inbounds"] = inbounds
-        for key in ["stats", "metrics", "api"] { root.removeValue(forKey: key) }
-
-        let data = try JSONSerialization.data(withJSONObject: root)
-        return String(decoding: data, as: UTF8.self)
-    }
-
-    /// Смена сервера внутри работающего туннеля. На очереди work.
-    private func swapCore(_ config: String, id: String?, title: String?) -> Bool {
-        if report.running {
-            XrayEngine.stopSync()
-            report.running = false
-        }
-        do {
-            try startCore(config)
-            report.routeID = id
-            report.routeTitle = title
-            return true
-        } catch {
-            report.error = error.localizedDescription
-            return false
-        }
+        return out
     }
 
     // MARK: - Трафик
 
     /// Счётчики самого интерфейса utun: что ушло в туннель (отправлено) и что пришло из него.
-    private func updateCounters() {
+    func updateCounters() {
         guard let name = utunName, let current = Self.interfaceBytes(name) else { return }
         if let last = ifaceLast {
             report.uplink += Int64(current.out &- last.out)
@@ -247,6 +323,24 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             return (stats.ifi_obytes, stats.ifi_ibytes)
         }
         return nil
+    }
+
+    // MARK: - Журнал
+
+    /// Короткая запись в журнал решений (видна в отчёте для поддержки). На очереди work.
+    func event(_ text: String) {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        events.append("\(formatter.string(from: Date())) \(text)")
+        if events.count > 24 { events.removeFirst(events.count - 24) }
+        report.events = events
+        log.info("\(text, privacy: .public)")
+    }
+
+    /// На очереди work.
+    func post(_ text: String) {
+        report.note = text
+        report.noteID += 1
     }
 
     // MARK: - Сеть
@@ -318,246 +412,5 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     static func error(_ message: String) -> NSError {
         NSError(domain: "com.secretclub.tunnel", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
-    }
-}
-
-// MARK: - Авто: проверка сервера и переключение при смене сети
-
-extension PacketTunnelProvider {
-    /// Выполнить блок на очереди work и дождаться результата.
-    private func onWork<T>(_ body: @escaping () -> T) async -> T {
-        await withCheckedContinuation { (cont: CheckedContinuation<T, Never>) in
-            work.async { cont.resume(returning: body()) }
-        }
-    }
-
-    private static var poolURL: URL? {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
-            .appendingPathComponent("auto-pool.json")
-    }
-
-    /// Список кандидатов: из опций запуска (свежий от приложения) или сохранённый (автоподключение).
-    private func loadPool(_ text: String?) {
-        if let text, let pool = TunnelCoding.decode(AutoPool.self, Data(text.utf8)) {
-            self.pool = pool
-            Self.savePool(pool)
-        } else if let url = Self.poolURL, let data = try? Data(contentsOf: url) {
-            pool = TunnelCoding.decode(AutoPool.self, data)
-        }
-    }
-
-    fileprivate static func savePool(_ pool: AutoPool) {
-        guard let url = poolURL, let data = TunnelCoding.encode(pool) else { return }
-        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? data.write(to: url, options: .atomic)
-    }
-
-    /// На очереди work.
-    private func startMonitoring() {
-        if pathMonitor == nil {
-            let monitor = NWPathMonitor()
-            monitor.pathUpdateHandler = { [weak self] path in self?.pathChanged(path) }
-            monitor.start(queue: work)
-            pathMonitor = monitor
-        }
-        if watchdog == nil {
-            let timer = DispatchSource.makeTimerSource(queue: work)
-            timer.schedule(deadline: .now() + 15, repeating: 15, leeway: .seconds(3))
-            timer.setEventHandler { [weak self] in self?.watchdogTick() }
-            timer.resume()
-            watchdog = timer
-        }
-    }
-
-    /// На очереди work.
-    private func stopMonitoring() {
-        pathMonitor?.cancel()
-        pathMonitor = nil
-        watchdog?.cancel()
-        watchdog = nil
-        pendingCheck?.cancel()
-        pendingCheck = nil
-    }
-
-    /// Сменился Wi‑Fi/мобильный интернет: старые соединения всё равно оборвались — проверяем сервер
-    /// и, если нужно, подбираем другой под новую сеть. Вызывается на очереди work.
-    private func pathChanged(_ path: Network.NWPath) {
-        let signature = NetworkCheck.signature(path)
-        guard signature != "other" else { return }
-        let previous = pathSignature
-        pathSignature = signature
-        guard let previous, previous != signature else { return }
-        log.info("network changed: \(previous, privacy: .public) → \(signature, privacy: .public)")
-        report.healthy = nil
-        if signature == "none" {
-            report.network = NetKind.offline.rawValue
-            return
-        }
-        report.network = nil
-        scheduleCheck(.network, delay: 2.5)
-    }
-
-    /// Раз в 15 с: если трафик уходит в туннель, а в ответ почти ничего — сервер, похоже, умер.
-    private func watchdogTick() {
-        updateCounters()
-        let up = report.uplink - lastTraffic.up
-        let down = report.downlink - lastTraffic.down
-        lastTraffic = (report.uplink, report.downlink)
-        guard report.running, !evaluating, pendingCheck == nil else { return }
-        let stalled = up > 6000 && down < up / 2
-        let due = lastCheck.map { Date().timeIntervalSince($0) > 30 } ?? true
-        if stalled && due { scheduleCheck(.stall, delay: 0) }
-    }
-
-    /// На очереди work. Смена сети важнее остальных причин.
-    fileprivate func scheduleCheck(_ reason: CheckReason, delay: Double) {
-        if pendingReason == .network && reason != .network {
-            return
-        }
-        pendingCheck?.cancel()
-        pendingReason = reason
-        let item = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            self.pendingCheck = nil
-            self.pendingReason = nil
-            Task { await self.evaluate(reason) }
-        }
-        pendingCheck = item
-        work.asyncAfter(deadline: .now() + delay, execute: item)
-    }
-
-    /// Выход в интернет через текущий сервер (CONNECT через локальный вход ядра). мс или nil.
-    private static func health(port: Int, tries: Int, timeout: Double = 5) async -> Int? {
-        guard port > 0 else { return nil }
-        for attempt in 0..<tries {
-            if let ms = await LatencyProbe.viaProxy(port: port, timeout: timeout) { return ms }
-            if attempt < tries - 1 { try? await Task.sleep(nanoseconds: 800_000_000) }
-        }
-        return nil
-    }
-
-    private func evaluate(_ requested: CheckReason) async {
-        let start: (Bool, Int, CheckReason) = await onWork {
-            guard self.report.running else { return (false, 0, requested) }
-            if self.evaluating {
-                // Сеть сменилась посреди проверки — повторим, когда закончим.
-                if requested == .network { self.scheduleCheck(.network, delay: 3) }
-                return (false, 0, requested)
-            }
-            self.evaluating = true
-            self.report.checking = true
-            // Приложение тоже заметило смену сети, но расширение её уже отработало.
-            var reason = requested
-            if reason == .network, let last = self.lastNetworkCheck, Date().timeIntervalSince(last) < 15 { reason = .app }
-            if reason == .network { self.lastNetworkCheck = Date() }
-            return (true, self.healthPort, reason)
-        }
-        guard start.0 else { return }
-        let port = start.1
-        let reason = start.2
-
-        async let healthMS = Self.health(port: port, tries: 2)
-        async let kind = NetworkCheck.kind()
-        let ms = await healthMS
-        let network = await kind
-
-        let state: (AutoPool?, String?, String?, String?, Date?) = await onWork {
-            self.report.network = network.rawValue
-            self.report.healthy = ms != nil
-            if let ms { self.report.pingMS = ms }
-            self.lastCheck = Date()
-            return (self.pool, self.report.routeID, self.report.routeTitle, self.currentConfig, self.failedAt)
-        }
-        log.info("check \(reason.rawValue, privacy: .public): network \(network.rawValue, privacy: .public), health \(ms ?? -1)")
-
-        if let pool = state.0, pool.auto, network != .offline {
-            let order = AutoPool.order(for: network)
-            let rank = pool.group(of: state.1).flatMap { order.firstIndex(of: $0) } ?? order.count
-            var groups: [String] = []
-            // Если только что перебрали всё без толку — не дёргаем туннель снова, пока не сменится сеть.
-            let cooling = state.4.map { Date().timeIntervalSince($0) < 120 } ?? false
-            if ms == nil {
-                if reason == .network || !cooling { groups = order }
-            } else if reason == .network, rank > 0 {
-                // Работает, но после смены сети можно вернуться на более быстрый вариант.
-                groups = Array(order.prefix(rank))
-            }
-            if !groups.isEmpty {
-                await failover(pool, groups: groups, healthy: ms != nil,
-                               original: (state.1, state.2, state.3), port: port)
-            }
-        }
-        await onWork {
-            self.evaluating = false
-            self.report.checking = false
-        }
-    }
-
-    /// Пробует кандидатов по группам: сперва отвечающие быстрее (по TCP/QUIC до сервера),
-    /// для каждого — настоящая проверка через ядро. Ничего не подошло — возвращаем прежний сервер.
-    private func failover(_ pool: AutoPool, groups: [String], healthy: Bool,
-                          original: (id: String?, title: String?, config: String?), port: Int) async {
-        await onWork { self.reasserting = true }
-        var found: (AutoCandidate, Int)?
-        search: for group in groups {
-            let list = pool.candidates.filter { $0.group == group && $0.id != original.id }
-            guard !list.isEmpty else { continue }
-            for candidate in await Self.rank(list).prefix(4) {
-                let started = await onWork { self.swapCore(candidate.config, id: candidate.id, title: candidate.title) }
-                guard started else { continue }
-                try? await Task.sleep(nanoseconds: 300_000_000)
-                if let ms = await Self.health(port: port, tries: 1, timeout: 4) {
-                    found = (candidate, ms)
-                    break search
-                }
-            }
-        }
-        let result = found
-        await onWork {
-            if let result {
-                let candidate = result.0
-                self.report.healthy = true
-                self.report.pingMS = result.1
-                let kind = Self.groupTitle(candidate.group)
-                let text = healthy
-                    ? "Сеть сменилась — подключили «\(candidate.title)»\(kind)"
-                    : "«\(original.title ?? "Сервер")» перестал отвечать — подключили «\(candidate.title)»\(kind)"
-                self.post(text)
-                self.failedAt = nil
-                self.log.info("switched to \(candidate.id, privacy: .public)")
-            } else {
-                if let config = original.config, self.currentConfig != config || !self.report.running {
-                    _ = self.swapCore(config, id: original.id, title: original.title)
-                }
-                if !healthy {
-                    self.failedAt = Date()
-                    self.post("В этой сети серверы не отвечают — попробуем снова, когда сеть сменится")
-                }
-            }
-            self.reasserting = false
-        }
-    }
-
-    private static func groupTitle(_ group: String) -> String {
-        switch group {
-        case "bridge": return " (для мобильной сети)"
-        case "reserve": return " (резерв)"
-        default: return ""
-        }
-    }
-
-    /// На очереди work.
-    private func post(_ text: String) {
-        report.note = text
-        report.noteID += 1
-    }
-
-    /// Кандидаты по задержке до сервера. Не открывшие TCP — отбрасываем; QUIC-серверы
-    /// без ответа на рукопожатие оставляем в конце (Hysteria2 отвечает не всегда).
-    private static func rank(_ list: [AutoCandidate]) async -> [AutoCandidate] {
-        let pings = await LatencyProbe.direct(list.compactMap(\.target), timeout: 2)
-        let answered = list.filter { pings[$0.id] != nil }.sorted { pings[$0.id]! < pings[$1.id]! }
-        let unknown = list.filter { pings[$0.id] == nil && ($0.target?.udp ?? true) }
-        return answered + unknown
     }
 }

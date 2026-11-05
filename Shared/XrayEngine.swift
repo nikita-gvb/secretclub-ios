@@ -53,9 +53,12 @@ enum XrayEngine {
         return data?["running"] as? Bool ?? false
     }
 
-    static func freePort() -> Int? {
-        let data = (try? invokeSync("getFreePorts", payload: ["count": 1])) as? [String: Any]
-        return (data?["ports"] as? [NSNumber])?.first?.intValue
+    static func freePort() -> Int? { freePorts(1).first }
+
+    static func freePorts(_ count: Int) -> [Int] {
+        guard count > 0 else { return [] }
+        let data = (try? invokeSync("getFreePorts", payload: ["count": count])) as? [String: Any]
+        return (data?["ports"] as? [NSNumber])?.map(\.intValue) ?? []
     }
 
     static func runSync(_ config: String) throws {

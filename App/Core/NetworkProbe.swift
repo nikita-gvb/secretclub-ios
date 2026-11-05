@@ -35,11 +35,14 @@ enum NetworkProbe {
         let session = URLSession(configuration: cfg)
         defer { session.finishTasksAndInvalidate() }
         var req = URLRequest(url: URL(string: t.url)!)
-        req.httpMethod = "HEAD"
+        if t.domestic { req.httpMethod = "HEAD" }
         let start = Date()
         do {
-            _ = try await session.data(for: req)
-            return ProbeResult(id: t.name, title: t.name, ms: Int(Date().timeIntervalSince(start) * 1000), isDomestic: t.domestic)
+            let (_, response) = try await session.data(for: req)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            // Зарубежная проверка — только настоящий 204: заглушка провайдера или портал входа не считаются.
+            let ok = t.domestic ? (code > 0 && code < 500) : code == 204
+            return ProbeResult(id: t.name, title: t.name, ms: ok ? Int(Date().timeIntervalSince(start) * 1000) : nil, isDomestic: t.domestic)
         } catch {
             return ProbeResult(id: t.name, title: t.name, ms: nil, isDomestic: t.domestic)
         }

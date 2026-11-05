@@ -1,6 +1,7 @@
 import SwiftUI
 import Observation
 import Network
+import CryptoKit
 
 enum AppTab: String, Hashable {
     case home, settings
@@ -89,6 +90,11 @@ final class AppModel {
     @ObservationIgnored private let defaults = UserDefaults.standard
     /// Номер текущей попытки подключения: новое нажатие отменяет старую.
     @ObservationIgnored private var connectToken = 0
+    /// Конфиги, которые ядро уже проверило (хэш) — второй раз testXray не гоняем.
+    @ObservationIgnored private var validated: [String] = UserDefaults.standard.stringArray(forKey: "validatedConfigs") ?? []
+    /// Статус узлов от бэкенда: хост → (онлайн, нагрузка).
+    @ObservationIgnored private var nodes: [String: NodeStatus] = [:]
+    @ObservationIgnored private var nodesAt: Date?
     @ObservationIgnored private var toastTask: Task<Void, Never>?
 
     let vpn = VPNController()
@@ -222,6 +228,7 @@ final class AppModel {
         if !vpn.isActive { await refreshNetwork() }
         guard isLoggedIn else { return }
         await refreshSubscription()
+        Task { await refreshNodes() }
         if !vpn.isActive && !energySaver { await pingAll() }
     }
 
@@ -236,6 +243,7 @@ final class AppModel {
             return
         }
         guard isLoggedIn else { return }
+        Task { await refreshNodes() }
         let interval: TimeInterval = energySaver ? 3 * 3600 : 3600
         if let updated = meta?.updatedAt, Date().timeIntervalSince(updated) < interval { return }
         await refreshSubscription()
@@ -698,13 +706,10 @@ final class AppModel {
         probedAt = nil
         switch vpn.state {
         case .connected, .connecting:
-            // Сеть проверит расширение (мимо туннеля) и при необходимости само сменит сервер.
+            // Смену сети расширение видит само (раньше приложения): перезапустит ядро, проверит
+            // все серверы разом и при необходимости переключится. Здесь только сбрасываем экран.
             networkMode = .unknown
             tunnelHealthy = nil
-            Task {
-                try? await Task.sleep(for: .seconds(2))
-                await vpn.requestCheck(network: true)
-            }
         case .disconnected, .invalid:
             if signature == "none" {
                 networkMode = .offline
@@ -889,25 +894,44 @@ final class AppModel {
         }
     }
 
-    private func pickAuto() async -> Route? {
-        // Замер, начатый раньше (например, на экране локаций), сначала доводим до конца.
-        await waitForPing()
-        if networkMode == .unknown || (probedAt.map { Date().timeIntervalSince($0) > 120 } ?? true) {
-            phase = "Проверяем сеть…"
-            await refreshNetwork()
-        }
+    /// С какого сервера начать в «Авто»: без замеров и ожидания. Расширение сразу после запуска
+    /// проверит его и все запасные параллельно (через ядро) и при необходимости переключится само.
+    private func initialAutoRoute() -> Route? {
+        if let best = bestCachedRoute(), isFresh([best]) { return best }
+        if let id = connectedRouteID, let route = routes.first(where: { $0.id == id }),
+           route.group != .reserve, !route.unavailable, !isNodeOffline(route) { return route }
         for group in groupOrder {
-            let list = candidates(group)
-            guard !list.isEmpty else { continue }
-            if !isFresh(list) {
-                phase = group.searchPhase
-                await ping(list.map(\.id))
-            }
-            let updated = candidates(group)
-            if let best = updated.filter({ $0.ping != nil }).min(by: { $0.ping! < $1.ping! }) { return best }
+            if let route = candidates(group).first(where: { !$0.unavailable && !isNodeOffline($0) }) { return route }
         }
-        return nil
+        return routes.first
     }
+
+    // MARK: - Статус узлов
+
+    /// Онлайн и нагрузка узлов от бэкенда (только со входом через Telegram). Не чаще раза в 2 минуты.
+    func refreshNodes() async {
+        guard !isDemo, let token = sessionToken else { return }
+        if let nodesAt, Date().timeIntervalSince(nodesAt) < 120 { return }
+        nodesAt = Date()
+        guard let json = try? await AccountAPI.call("/api/app/nodes", method: "GET", token: token, timeout: 8),
+              let list = json["nodes"] as? [[String: Any]] else { return }
+        var map: [String: NodeStatus] = [:]
+        for item in list {
+            guard let host = (item["host"] as? String)?.lowercased(), !host.isEmpty else { continue }
+            map[host] = NodeStatus(online: item["online"] as? Bool ?? true, load: (item["load"] as? NSNumber)?.doubleValue)
+        }
+        nodes = map
+    }
+
+    /// Свежий статус узла этого сервера (по адресу из конфига), если бэкенд его знает.
+    private func nodeStatus(_ route: Route) -> NodeStatus? {
+        guard let nodesAt, Date().timeIntervalSince(nodesAt) < 600, !nodes.isEmpty,
+              let raw = configs[route.id], let outbounds = raw["outbounds"] as? [[String: Any]],
+              let main = RouteClassifier.mainOutbound(outbounds) else { return nil }
+        return nodes[RouteClassifier.address(main).lowercased()]
+    }
+
+    private func isNodeOffline(_ route: Route) -> Bool { nodeStatus(route)?.online == false }
 
     // MARK: - Подключение
 
@@ -931,10 +955,16 @@ final class AppModel {
             guard !seen.contains(route.id), let raw = configs[route.id], let req = request(for: route) else { return }
             seen.insert(route.id)
             list.append(AutoCandidate(id: route.id, title: req.routeTitle, group: route.group.rawValue, config: req.config,
-                                      target: ConfigBuilder.pingTarget(id: route.id, raw: raw, udp: route.transport == .hysteria2)))
+                                      target: ConfigBuilder.pingTarget(id: route.id, raw: raw, udp: route.transport == .hysteria2),
+                                      load: nodeStatus(route)?.load))
         }
         for group in RouteGroup.allCases {
-            let ranked = candidates(group).sorted { ($0.ping ?? Int.max) < ($1.ping ?? Int.max) }
+            // Выключенные узлы (по данным бэкенда) — в конец; дальше по последнему замеру.
+            let ranked = candidates(group).sorted { a, b in
+                let oa = isNodeOffline(a), ob = isNodeOffline(b)
+                if oa != ob { return !oa }
+                return (a.ping ?? Int.max) < (b.ping ?? Int.max)
+            }
             ranked.prefix(6).forEach(add)
         }
         if let id = connectedRouteID, let route = routes.first(where: { $0.id == id }) { add(route) }
@@ -951,10 +981,13 @@ final class AppModel {
         guard let raw = configs[route.id] else { return "Нет настроек для «\(route.title)»" }
         let runtime = ConfigBuilder.runtime(raw, options: settings)
         guard let json = ConfigBuilder.validation(runtime, assetDir: Bundle.main.resourcePath) else { return "Не удалось собрать конфиг" }
+        let key = Self.digest(json)
+        if validated.contains(key) { return nil }
         await lockXray()
         defer { xrayBusy = false }
         do {
             try await XrayEngine.test(json)
+            rememberValid(key)
             return nil
         } catch {
             guard Self.isCoreBusy(error) else {
@@ -971,6 +1004,17 @@ final class AppModel {
             if Self.isCoreBusy(error) { return nil }
             return "Конфиг «\(route.title)» не прошёл проверку: \(error.localizedDescription)"
         }
+    }
+
+    private func rememberValid(_ key: String) {
+        validated.removeAll { $0 == key }
+        validated.append(key)
+        if validated.count > 60 { validated.removeFirst(validated.count - 60) }
+        defaults.set(validated, forKey: "validatedConfigs")
+    }
+
+    static func digest(_ text: String) -> String {
+        SHA256.hash(data: Data(text.utf8)).prefix(12).map { String(format: "%02x", $0) }.joined()
     }
 
     private static func isCoreBusy(_ error: Error) -> Bool {
@@ -1023,8 +1067,8 @@ final class AppModel {
         }
         let route: Route?
         if autoMode {
-            route = await pickAuto()
-            guard token == connectToken else { return }
+            // Замер, начатый раньше (например, на экране локаций), не дублируем — берём что есть.
+            route = initialAutoRoute()
             autoRouteID = route?.id
         } else {
             route = routes.first { $0.id == selectedRouteID }
@@ -1238,9 +1282,14 @@ final class AppModel {
         lines += probes.map { "  \($0.title): \($0.ms.map { "\($0) мс" } ?? "нет ответа")" }
         lines.append("VPN: \(String(describing: vpn.state)), кнопка: \(String(describing: power))")
         if let r = vpn.report {
-            lines.append("Ядро: \(r.coreVersion), работает: \(r.running ? "да" : "нет")\(r.memoryMB.map { ", память \(Int($0)) МБ" } ?? "")")
+            lines.append("Ядро: \(r.coreVersion), работает: \(r.running ? "да" : "нет")\(r.memoryMB.map { ", память \(Int($0)) МБ" } ?? "")\(r.multi == true ? ", проверка запасных: параллельно" : "")")
             if let e = r.error { lines.append("Ошибка ядра: \(e)") }
             if let h = r.healthy { lines.append("Сервер отвечает: \(h ? "да" : "нет")\(r.pingMS.map { ", \($0) мс" } ?? "")") }
+            if let ms = r.lastSwitchMS { lines.append("Последнее переключение: \(String(format: "%.1f", Double(ms) / 1000)) с") }
+            if let events = r.events, !events.isEmpty {
+                lines.append("Журнал расширения:")
+                lines += events.suffix(16).map { "  \($0)" }
+            }
         }
         if let route = activeRoute { lines.append("Маршрут: \(route.remarks) [\(route.group.rawValue), \(route.transportTitle)]") }
         lines.append("Режим: \(autoMode ? "Авто" : "вручную"), способ: \(TransportPreference(rawValue: defaults.string(forKey: SettingsKey.transport) ?? "")?.title ?? "Авто")")

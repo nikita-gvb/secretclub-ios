@@ -16,20 +16,29 @@ final class ResumeOnce<T>: @unchecked Sendable {
     }
 }
 
-/// Простое соединение на NWConnection с общим дедлайном: по его истечении
-/// соединение закрывается и все ожидающие операции завершаются неудачей.
+/// Простое соединение на NWConnection с общим дедлайном: по его истечении (или при отмене задачи)
+/// соединение закрывается и все ожидающие операции сразу завершаются неудачей.
 final class ProbeConnection: @unchecked Sendable {
     private let connection: NWConnection
     private let queue = DispatchQueue(label: "com.secretclub.probe")
+    private let lock = NSLock()
+    private var closed = false
 
     init?(host: String, port: Int, parameters: NWParameters) {
         guard let p = NWEndpoint.Port(rawValue: UInt16(clamping: port)), port > 0 else { return nil }
         connection = NWConnection(host: NWEndpoint.Host(host), port: p, using: parameters)
     }
 
-    /// Открывает соединение. false — не удалось (отказ, нет маршрута, таймаут).
+    private var isClosed: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return closed
+    }
+
+    /// Открывает соединение. false — не удалось (отказ, нет маршрута, таймаут, отмена).
     func open(timeout: Double) async -> Bool {
-        queue.asyncAfter(deadline: .now() + timeout) { [connection] in connection.cancel() }
+        if isClosed { return false }
+        queue.asyncAfter(deadline: .now() + timeout) { [weak self] in self?.close() }
         return await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
             let once = ResumeOnce(cont)
             connection.stateUpdateHandler = { state in
@@ -40,25 +49,31 @@ final class ProbeConnection: @unchecked Sendable {
                 }
             }
             connection.start(queue: queue)
+            if isClosed { once.resume(false) }
         }
     }
 
+    /// Можно вызывать сколько угодно раз и с любого потока.
     func close() {
-        connection.stateUpdateHandler = nil
+        lock.lock()
+        closed = true
+        lock.unlock()
         connection.cancel()
     }
 
     func send(_ text: String) async -> Bool {
-        await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
+        if isClosed { return false }
+        return await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
             connection.send(content: Data(text.utf8), completion: .contentProcessed { error in
                 cont.resume(returning: error == nil)
             })
         }
     }
 
-    private func receiveChunk() async -> Data? {
-        await withCheckedContinuation { (cont: CheckedContinuation<Data?, Never>) in
-            connection.receive(minimumIncompleteLength: 1, maximumLength: 16384) { data, _, _, _ in
+    func receiveChunk() async -> Data? {
+        if isClosed { return nil }
+        return await withCheckedContinuation { (cont: CheckedContinuation<Data?, Never>) in
+            connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, _, _ in
                 if let data, !data.isEmpty { cont.resume(returning: data) } else { cont.resume(returning: nil) }
             }
         }
@@ -66,6 +81,18 @@ final class ProbeConnection: @unchecked Sendable {
 
     /// Читает HTTP-ответ целиком (заголовки и тело по Content-Length), возвращает заголовки.
     func readHTTPHead() async -> String? {
+        guard let start = await readHead() else { return nil }
+        let head = start.0
+        var remaining = Self.contentLength(head) - start.1
+        while remaining > 0 {
+            guard let more = await receiveChunk() else { return nil }
+            remaining -= more.count
+        }
+        return head
+    }
+
+    /// Заголовки ответа и сколько байт тела уже пришло вместе с ними.
+    func readHead() async -> (String, Int)? {
         var buffer = Data()
         let separator = Data("\r\n\r\n".utf8)
         while true {
@@ -73,12 +100,7 @@ final class ProbeConnection: @unchecked Sendable {
             buffer.append(chunk)
             if let range = buffer.range(of: separator) {
                 let head = String(decoding: buffer[buffer.startIndex..<range.lowerBound], as: UTF8.self)
-                var remaining = Self.contentLength(head) - (buffer.endIndex - range.upperBound)
-                while remaining > 0 {
-                    guard let more = await receiveChunk() else { return nil }
-                    remaining -= more.count
-                }
-                return head
+                return (head, buffer.endIndex - range.upperBound)
             }
             if buffer.count > 65536 { return nil }
         }
@@ -93,6 +115,23 @@ final class ProbeConnection: @unchecked Sendable {
         }
         return 0
     }
+
+    /// Код ответа: «HTTP/1.1 204 No Content» → 204.
+    static func status(_ head: String) -> Int? {
+        guard head.hasPrefix("HTTP/") else { return nil }
+        let parts = head.split(separator: " ", maxSplits: 2)
+        return parts.count >= 2 ? Int(parts[1]) : nil
+    }
+}
+
+/// Итог проверки «большим» запросом через сервер.
+enum PayloadVerdict: Equatable {
+    /// Скачали целиком; скорость, КБ/с.
+    case ok(Int)
+    /// Соединение «замерло» после стольких байт — похоже на блокировку по объёму (~16 КБ).
+    case stalled(Int)
+    /// Проверочный сайт не ответил как надо — по этому замеру ничего сказать нельзя.
+    case inconclusive
 }
 
 enum LatencyProbe {
@@ -100,13 +139,25 @@ enum LatencyProbe {
         max(1, Int((DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000))
     }
 
+    /// Выполняет body, закрывая соединение при отмене задачи (ранний выход из параллельных замеров).
+    private static func using<T>(_ c: ProbeConnection, _ body: () async -> T) async -> T {
+        await withTaskCancellationHandler {
+            let result = await body()
+            c.close()
+            return result
+        } onCancel: {
+            c.close()
+        }
+    }
+
     /// Время установки TCP-соединения с сервером.
     static func tcp(host: String, port: Int, timeout: Double) async -> Int? {
         guard let c = ProbeConnection(host: host, port: port, parameters: .tcp) else { return nil }
-        defer { c.close() }
-        let start = DispatchTime.now()
-        guard await c.open(timeout: timeout) else { return nil }
-        return elapsedMS(since: start)
+        return await using(c) {
+            let start = DispatchTime.now()
+            guard await c.open(timeout: timeout) else { return nil }
+            return elapsedMS(since: start)
+        }
     }
 
     /// Время QUIC-рукопожатия (Hysteria2 отвечает как обычный HTTP/3-сервер).
@@ -116,10 +167,11 @@ enum LatencyProbe {
         sec_protocol_options_set_verify_block(security, { _, _, complete in complete(true) }, DispatchQueue.global())
         if let sni, !sni.isEmpty { sec_protocol_options_set_tls_server_name(security, sni) }
         guard let c = ProbeConnection(host: host, port: port, parameters: NWParameters(quic: options)) else { return nil }
-        defer { c.close() }
-        let start = DispatchTime.now()
-        guard await c.open(timeout: timeout) else { return nil }
-        return elapsedMS(since: start)
+        return await using(c) {
+            let start = DispatchTime.now()
+            guard await c.open(timeout: timeout) else { return nil }
+            return elapsedMS(since: start)
+        }
     }
 
     /// Замер до самих серверов, параллельно. Используется расширением, пока VPN включён.
@@ -144,24 +196,67 @@ enum LatencyProbe {
 
     /// Задержка через локальный HTTP-вход Xray: CONNECT, первый запрос (рукопожатие с сервером)
     /// и второй по уже открытому туннелю — он и есть «пинг». nil — сервер не ответил.
+    /// Ответ должен быть именно 204: так заглушка провайдера или чужая страница не сойдут за «работает».
     static func viaProxy(port: Int, timeout: Double = 5) async -> Int? {
         guard let c = ProbeConnection(host: "127.0.0.1", port: port, parameters: .tcp) else { return nil }
-        defer { c.close() }
-        let host = "www.gstatic.com"
-        guard await c.open(timeout: timeout),
-              await c.send("CONNECT \(host):80 HTTP/1.1\r\nHost: \(host):80\r\n\r\n"),
-              let connected = await c.readHTTPHead(), isOK(connected) else { return nil }
-        let request = "GET /generate_204 HTTP/1.1\r\nHost: \(host)\r\nUser-Agent: SecretClub\r\nAccept: */*\r\nConnection: keep-alive\r\n\r\n"
-        let first = DispatchTime.now()
-        guard await c.send(request), let r1 = await c.readHTTPHead(), r1.hasPrefix("HTTP/") else { return nil }
-        let firstMS = elapsedMS(since: first)
-        let second = DispatchTime.now()
-        guard await c.send(request), let r2 = await c.readHTTPHead(), r2.hasPrefix("HTTP/") else { return firstMS }
-        return elapsedMS(since: second)
+        return await using(c) {
+            let host = "www.gstatic.com"
+            guard await c.open(timeout: timeout),
+                  await c.send("CONNECT \(host):80 HTTP/1.1\r\nHost: \(host):80\r\n\r\n"),
+                  let connected = await c.readHTTPHead(), ProbeConnection.status(connected) == 200 else { return nil }
+            let request = "GET /generate_204 HTTP/1.1\r\nHost: \(host)\r\nUser-Agent: SecretClub\r\nAccept: */*\r\nConnection: keep-alive\r\n\r\n"
+            let first = DispatchTime.now()
+            guard await c.send(request), let r1 = await c.readHTTPHead(), ProbeConnection.status(r1) == 204 else { return nil }
+            let firstMS = elapsedMS(since: first)
+            let second = DispatchTime.now()
+            guard await c.send(request), let r2 = await c.readHTTPHead(), ProbeConnection.status(r2) == 204 else { return firstMS }
+            return elapsedMS(since: second)
+        }
     }
 
-    private static func isOK(_ head: String) -> Bool {
-        let status = head.split(separator: " ").dropFirst().first
-        return status == "200"
+    /// Сайты для «большой» проверки: обычный HTTP (внутри туннеля всё равно шифруется), ~100 КБ.
+    private static let payloadTargets: [(host: String, path: String)] = [
+        ("cachefly.cachefly.net", "/100kb.test"),
+        ("speedtest.tele2.net", "/100KB.zip"),
+    ]
+
+    /// Скачивает ~100 КБ через сервер. Маленькая проверка (204) проходит и там, где провайдер
+    /// «замораживает» соединение после ~16 КБ, — эта нет.
+    static func payload(port: Int, timeout: Double = 10) async -> PayloadVerdict {
+        for target in payloadTargets {
+            let verdict = await payloadOnce(port: port, host: target.host, path: target.path, timeout: timeout)
+            if verdict != .inconclusive { return verdict }
+            if Task.isCancelled { break }
+        }
+        return .inconclusive
+    }
+
+    private static func payloadOnce(port: Int, host: String, path: String, timeout: Double) async -> PayloadVerdict {
+        guard let c = ProbeConnection(host: "127.0.0.1", port: port, parameters: .tcp) else { return .inconclusive }
+        return await using(c) {
+            guard await c.open(timeout: timeout),
+                  await c.send("CONNECT \(host):80 HTTP/1.1\r\nHost: \(host):80\r\n\r\n"),
+                  let connected = await c.readHTTPHead(), ProbeConnection.status(connected) == 200 else { return .inconclusive }
+            let request = "GET \(path) HTTP/1.1\r\nHost: \(host)\r\nUser-Agent: SecretClub\r\nAccept: */*\r\nConnection: close\r\n\r\n"
+            let start = DispatchTime.now()
+            guard await c.send(request), let response = await c.readHead(),
+                  let code = ProbeConnection.status(response.0), code == 200 || code == 206 else { return .inconclusive }
+            let head = response.0
+            let first = response.1
+            let expected = ProbeConnection.contentLength(head)
+            guard expected >= 32768 else { return .inconclusive }
+            let goal = min(expected, 98304)
+            var received = first
+            while received < goal {
+                guard let chunk = await c.receiveChunk() else { break }
+                received += chunk.count
+            }
+            let ms = elapsedMS(since: start)
+            // Блокировка по объёму обрывает на ~16–20 КБ; медленная, но живая сеть успевает больше.
+            if received >= goal || received >= 40960 {
+                return .ok(max(1, received * 1000 / 1024 / ms))
+            }
+            return .stalled(received)
+        }
     }
 }

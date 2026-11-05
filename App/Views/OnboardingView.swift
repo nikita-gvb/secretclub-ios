@@ -78,12 +78,13 @@ private struct FeatureRow: View {
         HStack(alignment: .top, spacing: 14) {
             Image(systemName: icon)
                 .font(.system(size: 21, weight: .semibold))
-                .foregroundStyle(Theme.tint)
+                .foregroundStyle(Theme.ink)
                 .frame(width: 44, height: 44)
                 .background(Theme.tintSoft, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             VStack(alignment: .leading, spacing: 2) {
                 Text(title).font(.scHeadline).foregroundStyle(Theme.label)
                 Text(text).font(.scSub).foregroundStyle(Theme.label2)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 0)
         }
